@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environments & Keys
+.env
+*.env.local
+config/gemini_keys.bin
+
+# Database & SQLite
+*.db
+*.sqlite3
+*.sqlite
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Project Storage & Outputs
+storage/
+projects/
+output/
+logs/
+scratch/
+*.log
+tmp_test_pool/
+tools/videosubfinder/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
+
+config/local_translation.key
+tools/llama-cuda124-*/

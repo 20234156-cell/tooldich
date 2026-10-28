@@ -1,0 +1,2 @@
+# Optional CPU custom-voice runtime, isolated behind src.tts.vieneu_worker.
+vieneu==3.8.3

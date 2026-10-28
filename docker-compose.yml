@@ -1,0 +1,26 @@
+services:
+  duanlaylink:
+    build: .
+    image: duanlaylink:latest
+    container_name: duanlaylink
+    ports:
+      - "8088:8088"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-base}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-120}
+    volumes:
+      # Dữ liệu dự án và database nằm ngoài container để không mất khi rebuild
+      - ./storage:/app/storage
+    # Kích hoạt GPU NVIDIA nếu có sẵn trên máy host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+.env
+*.env.local
+storage/
+scratch/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+docs/
+
+.git
+.idea/
+.vscode/
