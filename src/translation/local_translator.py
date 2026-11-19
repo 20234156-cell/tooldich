@@ -42,6 +42,8 @@ class LocalTranslator:
     version = 'HY-MT1.5-1.8B-Q4_K_M-265b2e6-single-v2'
 
     def __init__(self):
+        self.skip_invalid = False
+        self.skipped_ids = set()
         self.url = (settings.LOCAL_TRANSLATION_URL or '').rstrip('/')
         parsed = urlparse(self.url)
         if parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost', '::1'} or parsed.username:
@@ -56,6 +58,7 @@ class LocalTranslator:
         return {'available': available, 'model': self.version}
 
     def translate_cues(self, cues, output_dir=None, progress_callback=None, should_continue=None, tone='natural', publish_artifacts=False):
+        self.skipped_ids = set()
         # HY-MT is a translation model, not a reliable multi-row ID mapper.
         # One source per request prevents structurally valid shifted batches.
         total = len(cues)
@@ -122,6 +125,10 @@ class LocalTranslator:
                                         'http_status':response.status_code if response is not None else None,
                                         'http_error':response.text[:2000] if response is not None and response.status_code >= 400 else None},ensure_ascii=False)+'\n')
                     if rows is None:
+                        if (self.skip_invalid and isinstance(last_error, (ValueError, KeyError, TypeError, IndexError))
+                                and isinstance(result, dict) and 'HY-MT1.5-1.8B' in result.get('model', '')):
+                            self.skipped_ids.add(cue.index)
+                            continue
                         raise PipelineException(SystemErrorCodes.INVALID_TRANSLATION_RESPONSE,
                             f'Local translation failed at cue {cue.index}: {last_error}') from last_error
                     if cache:

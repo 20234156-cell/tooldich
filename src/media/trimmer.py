@@ -13,6 +13,7 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 
 from config.settings import settings
+from src.jobs.resources import media_timeout
 from src.gpu import h264_encoder_args
 from src.jobs.logger import PipelineException, SystemErrorCodes
 
@@ -182,7 +183,7 @@ def clip_video_segment(
             cmd_args,
             capture_output=True,
             text=True,
-            timeout=getattr(settings, "FFMPEG_TIMEOUT_SECONDS", 180),
+            timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS, duration),
             check=False,
         )
 

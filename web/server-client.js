@@ -1,5 +1,6 @@
 // Optional server-mode session, per-tab project ownership and administration.
 (() => {
+  if(window.workspacePersonal || window.workspaceOffline) {window.workspaceServerReady=Promise.resolve();window.workspaceServerEnabled=false;return;}
   const originalFetch=window.fetch.bind(window);
   let session={enabled:false},readyResolve,leaseProject=null,heartbeat=null;
   const revisions=new Map(),writes=new Map();

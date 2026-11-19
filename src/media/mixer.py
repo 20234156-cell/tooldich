@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
+from src.jobs.resources import media_timeout, probe_media_duration
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -252,7 +253,7 @@ class VoiceoverMixer:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=settings.FFMPEG_TIMEOUT_SECONDS,
+                    timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS, probe_media_duration(video)),
                     check=False,
                     # Bộ lọc khắc phụ đề chỉ nhận tên tệp (xem build_burn_filter),
                     # nên ffmpeg phải chạy ngay trong thư mục chứa tệp phụ đề.

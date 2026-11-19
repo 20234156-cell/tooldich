@@ -72,7 +72,7 @@
   $('search-input').addEventListener('input',()=>{
     const value=$('search-input').value.trim().toLocaleLowerCase('vi');
     if(value && !DOM.views.dashboard.classList.contains('active')) showView('dashboard');
-    document.querySelectorAll('#project-rows tr[data-id]').forEach(row=>{row.hidden=!row.textContent.toLocaleLowerCase('vi').includes(value);});
+    window.setProjectSearch($('search-input').value);
   });
   const statIds=['stat-total','stat-verified','stat-processing','dash-keys','dash-requests','dash-tokens','dash-latency','dash-cloud'];
   let hydrated=false;
@@ -95,7 +95,7 @@
         }
         previous.set(id,value);
       }
-      $('dashboard-summary-status').textContent=`Số liệu toàn bộ không gian · cập nhật ${new Date(data.measured_at).toLocaleTimeString('vi-VN',{timeZone:'Asia/Bangkok'})} (UTC+7). Token là tổng phần API đã báo, chưa gồm suy luận.`;
+      $('dashboard-summary-status').textContent=`Cập nhật ${new Date(data.measured_at).toLocaleTimeString('vi-VN',{timeZone:'Asia/Bangkok'})} (UTC+7).` + (window.workspaceOffline ? ' · Xử lý trên máy của bạn.' : ' Token là tổng phần API đã báo, chưa gồm suy luận.');
       const groups=[['Chuẩn bị',['CREATED','SOURCE_READY','MEDIA_READY','ROI_READY']],['Phụ đề & dịch',['OCR_READY','SOURCE_REVIEWED','TRANSLATED','TRANSLATION_REVIEWED']],['Giọng & render',['VOICE_READY','RENDERED']],['QA kỹ thuật',['VERIFIED']]];
       const stageMarkup=groups.map(([label,stages])=>{
         const count=stages.reduce((sum,state)=>sum+(p.stages[state]||0),0);
@@ -107,7 +107,28 @@
         stageNodes[index].querySelector('strong').textContent=number(count);
         stageNodes[index].querySelector('i').style.width=`${p.total?count/p.total*100:0}%`;
       }); else $('dashboard-stages').innerHTML=stageMarkup;
-      $('dashboard-attention').innerHTML=[['Cue chưa có bản dịch',number(p.missing_translation)],['Cue chưa duyệt nội dung',number(p.unreviewed_cues)],['Dự án chưa có transcript DB',number(p.missing_transcripts)],['Kết nối Google Drive',data.cloud.connected?'Đã kết nối':'Chưa kết nối']].map(([label,value])=>`<div class="attention-row"><span>${label}</span><strong>${value}</strong></div>`).join('');
+      const attention=[['Câu chưa dịch · toàn bộ dự án',number(p.missing_translation)],
+        ['Câu đã dịch chưa xác nhận riêng',number(p.translated_pending)],
+        ['Dự án chưa có bản ghi phụ đề',number(p.missing_transcripts)]];
+      if(!window.workspacePersonal && !window.workspaceOffline) attention.push(['Kết nối Google Drive',data.cloud.connected?'Đã kết nối':'Chưa kết nối']);
+      $('dashboard-attention').innerHTML=attention.map(([label,value])=>`<div class="attention-row"><span>${label}</span><strong>${value}</strong></div>`).join('');
+      for(const item of data.attention||[]){
+        const row=document.createElement('div');row.className='attention-row attention-project';
+        const title=document.createElement('span');title.textContent=item.title;
+        title.title=item.project_id;
+        const action=document.createElement('button');action.type='button';action.className='btn small';
+        const stageLabels={OCR_READY:'Duyệt phụ đề gốc', SOURCE_REVIEWED:'Dịch tiếng Việt',
+          TRANSLATED:'Duyệt bản dịch', TRANSLATION_REVIEWED:'Mở bước đang làm',
+          VOICE_READY:'Bước 8 · Render', RENDERED:'Bước 9 · Nghiệm thu', VERIFIED:'Xem thành phẩm'};
+        const label=item.task_state==='QUEUED' ? 'Xem tác vụ đang chờ'
+          : item.task_state==='RUNNING' && item.task_action==='render' ? 'Bước 8 · Đang render'
+          : item.task_state==='RUNNING' ? 'Xem tác vụ đang chạy'
+          : stageLabels[item.stage] || 'Mở Studio';
+        action.textContent=`${label} →`;
+        action.title=`${number(item.missing_translation)} câu chưa dịch · ${number(item.translated_pending)} câu đã dịch chưa xác nhận riêng`;
+        action.onclick=()=>openProject(item.project_id);
+        row.append(title,action);$('dashboard-attention').append(row);
+      }
       $('dash-keys').nextElementSibling.textContent=`${data.keys.healthy} khỏe · ${data.keys.waiting} chờ · ${data.keys.invalid} vô hiệu`;
       $('dash-tokens').nextElementSibling.textContent=`Input ${number(r.input_tokens)} / output ${number(r.output_tokens)} · dữ liệu ${r.input_tokens_reported_requests}/${r.today} lượt`;
       hydrated=true;

@@ -1,491 +1,574 @@
-# DuanLayLink — Làm phụ đề và lồng tiếng Việt cho video
+# DuanLayLink — Studio Video Cá Nhân
 
-Tài liệu này dành cho người sử dụng, không cần biết lập trình. Đây là hướng dẫn chính của dự án; bạn không cần đọc mã nguồn hoặc các báo cáo thử nghiệm cũ để vận hành.
+Ứng dụng làm phụ đề và lồng tiếng Việt cho video ngắn và dài (Douyin, Bilibili, TikTok, tệp video máy tính): tải video, nhận dạng chữ/lời thoại (RapidOCR / Whisper), dịch thuật đa nguồn (Gemini / HY-MT / Azure), tạo giọng đọc AI (Piper / VieNeu / Edge-TTS), căn timing theo video (`cluster-budget-v1`), che sub cũ, ghép sub Việt và xuất MP4 / SRT theo mục tiêu đã chọn. Khả năng tải phụ thuộc nguồn, quyền truy cập và cookie; chất lượng nhận dạng, dịch và giọng vẫn cần xem/nghe lại.
 
-## 1. Hệ thống này dùng để làm gì?
+**API/AI vẫn được giữ.** Cấu hình cá nhân mặc định là `PERSONAL_MODE=true`, `OFFLINE_MODE=false`. Kết nối mạng được dùng cho việc tải video nguồn, gọi API Gemini và giọng online; không cần cấu hình server cho máy khác, cloud hay tài khoản nhiều người. Tuyệt đối không sửa hoặc chia sẻ nội dung file `.env` chứa khóa API.
 
-DuanLayLink giúp biến video tiếng Trung thành video có phụ đề và giọng đọc tiếng Việt. Bạn có thể nhập đường dẫn Bilibili, Douyin, TikTok hoặc một video có sẵn trên máy. Khả năng tải bằng đường dẫn còn phụ thuộc quyền truy cập và dịch vụ nguồn.
+---
 
-Ứng dụng nhận chữ Trung trên hình hoặc nghe lời thoại, dịch sang tiếng Việt, tạo giọng đọc, che phụ đề gốc và xuất video mới. Bạn có thể giữ tiếng gốc, thêm giọng Việt trên nền âm thanh cũ hoặc chỉ dùng giọng Việt.
+## Mục lục
 
-Bạn quyết định bản dịch, kiểu phụ đề và giọng đọc. Các bước nhận dạng, dịch và đọc bằng máy vẫn cần kiểm tra; video xuất thành công chưa có nghĩa mọi câu đều đúng nghĩa hoặc nghe tự nhiên.
+1. [Không gian làm việc & Thư mục duy nhất](#thư-mục-duy-nhất)
+2. [Khởi động & Mở ứng dụng](#mở-ứng-dụng)
+3. [Quản lý dự án trên Bảng điều khiển (Dashboard)](#quản-lý-dự-án-trên-bảng-điều-khiển)
+4. [Quy trình làm video (9 Bước Studio & Auto 1-Click)](#quy-trình-làm-video)
+5. [Bóc tách phụ đề và kiểm tra nguồn](#bóc-tách-phụ-đề-và-kiểm-tra-nguồn)
+6. [Điều phối dịch thuật đa nguồn & Quản lý API Key](#điều-phối-dịch-thuật-đa-nguồn--quản-lý-api-key)
+7. [Tạo giọng đọc & Căn chỉnh Timing Bước 7 (Cluster Budget)](#tạo-giọng-đọc--căn-chỉnh-timing-bước-7)
+8. [Che chữ mờ tự nhiên, Mẫu sub & Render video](#che-chữ-mờ-tự-nhiên-mẫu-sub--render-video)
+9. [Khắc phục sự cố, Duyệt thủ công & Tiếp tục Auto](#khắc-phục-sự-cố-duyệt-thủ-công--tiếp-tục-auto)
+10. [Hướng dẫn CLI & Bộ công cụ Benchmark / Chẩn đoán](#hướng-dẫn-cli--bộ-công-cụ-benchmark--chẩn-đoán)
+11. [Bảng tra cứu cấu hình `.env`](#bảng-tra-cứu-cấu-hình-env)
+12. [Nguyên tắc vận hành & An toàn dữ liệu](#nguyên-tắc-vận-hành--an-toàn-dữ-liệu)
 
-Với Douyin, có thể dán link video `/video/...`, link rút gọn `v.douyin.com/...` hoặc link đang mở video dạng `/jingxuan?modal_id=...` và `/discover?modal_id=...`. Ứng dụng tự chuyển hai dạng có `modal_id` sang link video chuẩn; khả năng tải vẫn phụ thuộc quyền truy cập nguồn.
+---
 
-Nếu Douyin yêu cầu cookie phiên mới, có thể cấu hình `DOUYIN_COOKIE_FILE` trong `.env` bằng đường dẫn đến tệp cookie dạng Netscape do bạn xuất từ phiên trình duyệt của mình, rồi khởi động lại máy chủ. Khi API trực tiếp từ chối, ứng dụng thử mở trang video bằng Chromium với phiên cookie này và chỉ nhận dữ liệu đúng ID video. Máy mới cần chạy `python -m playwright install chromium` sau khi cài thư viện. Không tự giải CAPTCHA; nếu trang vẫn yêu cầu xác minh, hãy xử lý trong trình duyệt của bạn. Tệp cookie là thông tin riêng, không gửi nội dung vào chat hay đưa lên Git. Khi không có quyền truy cập nguồn, bạn có thể tải video bằng trình duyệt rồi nhập tệp local. Bilibili HTTP 412 là lỗi nguồn từ chối yêu cầu lấy luồng video; kiểm tra phiên đăng nhập/cookie và thử lại sau. Nhận được link hoặc đọc được tiêu đề chưa có nghĩa đã tải video thành công.
+## Thư mục duy nhất
 
-Nếu Douyin đọc được tiêu đề nhưng bản cũ báo “không thể kết nối đến luồng tải sau 30 lần thử”, hãy cập nhật và khởi động lại máy chủ: đã bổ sung CDN `zjcdn.com` và giữ nguyên nguyên nhân khi URL bị chặn. Lỗi chặn URL không được giải quyết bằng cách bấm tải lặp lại nhiều lần.
+Bản chính thức duy nhất nằm tại thư mục: **`D:\duanlaylink`**.
 
-Phiên Chromium dùng cho Douyin được giữ trong `storage/private/douyin_browser_profile`, độc lập với trình duyệt cá nhân của bạn. Ứng dụng chỉ nạp cookie khi bạn cung cấp một bản xuất mới; các lần đọc sau giữ lại trạng thái phiên mà Douyin đã cập nhật. Không xóa thư mục này để dọn rác khi còn đang dùng Douyin. Có thể đổi vị trí bằng `DOUYIN_BROWSER_PROFILE` trong `.env`.
+- Toàn bộ mã nguồn, cơ sở dữ liệu (`storage/app.db`), các dự án (`storage/projects`) và công cụ hỗ trợ (`tools/`, `storage/models/`) tập trung tại đây.
+- Sử dụng shortcut **DuanLayLink** trên Desktop hoặc chạy file `start_server.bat` trong thư mục này.
 
-**Ví dụ:** bạn có video 10 phút với chữ Trung ở cạnh dưới. Bạn khoanh vùng chữ, cho hệ thống nhận dạng, sửa câu nhận sai, duyệt bản dịch, chọn mẫu chữ và giọng Việt, rồi xuất MP4. Video nguồn vẫn được giữ để chỉnh lại sau.
+Các lệnh bên dưới chạy từ thư mục gốc của kho mã.
 
-## 2. Mở ứng dụng
+README mô tả mã nguồn hiện tại, rà soát ngày **15/11/2026**. Các giá trị trong bảng cấu hình là mặc định của `config/settings.py`, không phải bản chụp `.env` trên máy. Biến môi trường, `.env`, launcher và thiết lập đã lưu của từng dự án có thể làm giá trị thực tế khác bảng.
 
-### Vận hành trên máy RAM 8 GB
+## Mở ứng dụng
 
-Máy i3-10100F / GTX 1050 Ti 4 GB hiện chỉ có một thanh RAM 8 GB. Giữ một công đoạn video nặng tại một thời điểm. Trước OCR/TTS/render, xem **Quản lý máy chủ → Ổ đĩa & tài nguyên**, đóng các ứng dụng không cần sau khi lưu công việc; RAM khả dụng dưới 2 GB vẫn là cảnh báo, không phải trạng thái đủ tải.
+Logo NpzzSub từ ảnh thương hiệu dùng chung cho biểu tượng tab, đầu trang Studio và lớp logo xem trước/xuất video. Biểu tượng tab, logo đầu trang, logo xem trước và logo video đều hiển thị hình tròn. Để áp dụng logo mới cho MP4 đã xuất, mở dự án và chạy lại bước Xuất video.
 
-Ngày 26/10/2026, nhật ký Windows ghi nhiều sự kiện 2004 thiếu bộ nhớ ảo; Pyrefly của Antigravity giữ khoảng 2 GB bộ nhớ riêng. Cấu hình người dùng Antigravity đã đặt `pyrefly.lspArguments` thành `["lsp", "--indexing-mode", "none", "--threads", "2"]`. Cấu hình này hạn chế tìm tham chiếu toàn dự án; xóa khóa để trở về mặc định khi đã nâng RAM. Không dừng backend hoặc xóa cache dự án để giải phóng RAM.
+### 1. Khởi động nhanh (Khuyên dùng)
 
-Bộ nhớ ảo hiện vẫn cấu hình thủ công; lần thử bật Windows tự quản lý bị từ chối quyền quản trị, chưa áp dụng. Khi có quyền admin, có thể chọn **System Properties → Advanced → Performance Settings → Advanced → Virtual memory → Automatically manage**; Windows có thể yêu cầu khởi động lại, chỉ thực hiện sau khi lưu công việc và dừng tác vụ. Lưu Drive giải phóng đĩa khi đã dọn đúng quy trình, không thay thế RAM. Nâng RAM lên 16 GB là mức đầu tư đầu tiên; nếu thường mở IDE/AI cùng server, ưu tiên 32 GB sau khi đối chiếu tương thích bo mạch.
+1. Nhấp đúp vào file **`start_server.bat`** (hoặc chạy qua phím tắt ngoài Desktop).
+2. Đợi launcher tự động kiểm tra cổng và trình duyệt mở **http://127.0.0.1:9000/**.
+3. Chọn dự án cũ để tiếp tục hoặc dán link video (Douyin, Bilibili) / đường dẫn tệp trên máy (ví dụ `D:\Video\phim.mp4`) để tạo dự án mới.
+4. Giữ cửa sổ dòng lệnh mở trong suốt quá trình xử lý. Khi không còn tác vụ nào chạy, nhấn **Ctrl+C** để đóng server an toàn.
 
-Nếu máy đã được cài và đang dùng dự án này:
+### 2. Tùy chọn nâng cao khi mở Studio
 
-1. Mở thư mục dự án, chạy **`start_server.bat`**.
-2. Đợi cửa sổ máy chủ khởi động. Trình duyệt sẽ mở; nếu chưa mở, truy cập **http://127.0.0.1:8088/**.
-3. Giữ cửa sổ máy chủ mở trong lúc xử lý. Đóng cửa sổ này sẽ ngắt ứng dụng.
-4. Chọn dự án cũ để tiếp tục hoặc tạo dự án mới.
+- **Đổi cổng khởi động:**
+  ```cmd
+  start_server.bat 9000
+  ```
+- **Chạy hoàn toàn ngoại tuyến (Offline Mode):**
+  Khi bật cờ này, ứng dụng chỉ dùng các model cục bộ trên máy (HY-MT dịch thuật, Piper/VieNeu đọc tiếng, Whisper nhận dạng giọng nói; không gọi API ngoại mạng, không tự tải thêm model):
+  ```powershell
+  python scripts/run_personal.py --offline
+  ```
+  Chế độ offline không tải được video từ liên kết mạng; dùng tệp video đã có trên máy. Các model/runtime cần được cài sẵn. Thiếu model thì công đoạn tương ứng có thể báo lỗi hoặc cần thao tác thủ công.
+- **Chế độ máy chủ mạng LAN (Small Server):**
+  Khi cần mở giao diện cho các thiết bị khác trong cùng mạng nội bộ truy cập:
+  ```cmd
+  start_small_server.bat
+  ```
+  Đây là chế độ riêng, mặc định dùng cổng **8088**. Đặt `PERSONAL_MODE=false` và `OFFLINE_MODE=false` trong cấu hình để chế độ server có hiệu lực. Lần đầu mở `http://127.0.0.1:8088/` trên chính máy chủ để tạo quản trị viên; sau đó dừng và chạy lại launcher để mở LAN. Dùng địa chỉ LAN mà launcher in ra. Chỉ mở cổng tường lửa trên mạng riêng tin cậy.
 
-`127.0.0.1` là máy của bạn. Giao diện mở trong trình duyệt nhưng các bước xử lý chạy ở ứng dụng trên máy.
+Các ví dụ `python ...` yêu cầu chạy bằng môi trường Python đã cài các dependency của dự án. `start_server.bat` ưu tiên `.venv`, sau đó `venv`, rồi mới dùng `python` trên PATH. Riêng launcher cá nhân luôn đặt `PERSONAL_MODE=true`, `SERVER_MODE=false`, và đặt `OFFLINE_MODE` theo cờ `--offline`.
 
-Tải lại trang sẽ mở lại dự án/trang đang xem trong chính tab trình duyệt đó. Nếu bạn chủ động về Tổng quan rồi tải lại, ứng dụng giữ trang Tổng quan. Dự án đã xóa sẽ không được mở lại; lỗi kết nối tạm thời hiển thị thông báo để bạn thử tải lại. Vị trí được lưu trong phiên tab, không chứa nội dung phụ đề hay thông tin đăng nhập.
+### 3. Quy trình nạp mã mới sau cập nhật
 
-Nếu báo cổng 8088 đang được dùng, kiểm tra có cửa sổ ứng dụng khác đang mở hay không. Có thể dùng cổng khác bằng lệnh `start_server.bat 127.0.0.1 9000`, rồi mở `http://127.0.0.1:9000/`.
+- Đợi các tác vụ đang chạy kết thúc, nhấn **Ctrl+C** đóng cửa sổ server cũ.
+- Chạy lại **`start_server.bat`**. Launcher đối chiếu phiên bản backend từ API sức khỏe với phiên bản mà launcher yêu cầu. Dùng cùng địa chỉ Studio cho các dự án tiếp theo.
+- Mở lại trình duyệt và nhấn **Ctrl+F5** (hoặc Ctrl+Shift+R) một lần để nạp mã JavaScript/CSS mới nhất.
 
-Sau khi cập nhật mã nguồn, dừng ứng dụng khi không có tác vụ đang chạy rồi mở lại `start_server.bat`. Nhấn **Ctrl+F5** trong trình duyệt để nạp giao diện mới. Chỉ tải lại trang không nạp lại phần xử lý Python đang chạy.
+---
 
-### Quản trị máy chủ
+## Quản lý dự án trên Bảng điều khiển
 
-Mở **Quản lý máy chủ** bằng tài khoản admin. Chọn từng mục ở thanh điều hướng; có thể dùng phím mũi tên để chuyển mục. Nút **Làm mới** lấy lại số liệu và giữ mục đang xem.
+Tại màn hình **Tổng quan (Dashboard)**:
 
-- **Tổng quan:** CPU, RAM, tác vụ đang chạy/chờ, lần sao lưu hoàn tất gần nhất và cảnh báo có nút chuyển tới mục xử lý. Số liệu đo tại thời điểm tải, không tự cập nhật liên tục.
-- **Ổ đĩa & tài nguyên:** dung lượng trống/tổng của các ổ ứng dụng, dữ liệu và kho sao lưu đã cấu hình; GPU/VRAM nếu đọc được NVIDIA. Không đo được phải hiển thị thiếu số liệu. Khác ký tự ổ chưa có nghĩa khác thiết bị vật lý.
-- **Tác vụ:** tìm theo dự án/người gửi/công đoạn và lọc trạng thái trong tối đa 50 tác vụ gần nhất; xem lỗi, mở dự án, tạm dừng an toàn hoặc hủy tác vụ có quyền. Tiến độ lưu gần nhất không khẳng định worker bị đứng. Tiếp tục công đoạn từ trang dự án sau khi kiểm tra điều kiện phục hồi.
-- **Tài khoản / Chia sẻ / Phiên & quyền sửa:** cấp quyền, mời người dùng, chỉnh tài khoản và thu hồi phiên. Chi tiết trình duyệt nằm trong phần mở rộng. Thay đổi tài khoản được ghi vào nhật ký cùng người thực hiện, không ghi mật khẩu.
-- **Sao lưu / Dọn dữ liệu / Nhật ký:** giữ các bước xem trước và kiểm chứng hiện có. Cảnh báo sao lưu dùng thời điểm bản hoàn tất; mức kiểm chứng và bản sao độc lập xem trong mục Sao lưu. Bản hoàn tất không đồng nghĩa đã phục hồi thử.
+- **Tìm kiếm và lọc trạng thái:** Tìm nhanh theo tên hoặc mã dự án (hỗ trợ gõ tiếng Việt không dấu), kết hợp bộ lọc 9 trạng thái công đoạn. Danh sách hỗ trợ phân trang 10 / 20 / 50 mục. Ô tìm kiếm ở thanh đầu trang đồng bộ kết quả trực tiếp với bảng.
+- **Thẻ việc cần chú ý:** Tự động hiển thị nút bấm dẫn thẳng vào bước đang xử lý hoặc bước tiếp theo của từng dự án: dự án đã qua QA mở **Nghiệm thu**, dự án đã tạo giọng mở **Render**, dự án đang ở bước OCR mở **Phụ đề gốc**. Số lượng câu nghi vấn cần kiểm tra được hiển thị riêng biệt.
+- **Đồng hồ thời gian thực tế:** Bảng tự động cập nhật mỗi 5 giây. Bấm mũi tên cạnh tên dự án để xem các thông số đo lường:
+  - **Xử lý thực:** Tổng thời gian các tiến trình công việc thực sự chạy.
+  - **Chờ / gián đoạn:** Thời gian xếp hàng, chờ người dùng duyệt bài hoặc tạm dừng chủ động.
+  - **Chạy lỗi:** Ghi lại thời gian chạy thất bại để bạn nắm rõ điểm nghẽn.
+- **Hủy tác vụ:** Trong Studio, bấm **Hủy tác vụ** và đợi trạng thái **Đã hủy**. Video nguồn và dữ liệu dự án vẫn có thể dùng để tiếp tục.
+- **Xóa dự án:** Trong Studio hoặc Tổng quan, mở hộp thoại xác nhận và kiểm tra danh sách trước khi bấm **Xóa vĩnh viễn**. Dự án đang xếp hàng, đang chạy hoặc đang dừng phải đợi tác vụ kết thúc. Nếu tệp đang mở, Studio báo lỗi và giữ dự án trong danh sách để thử lại.
 
-Số liệu hạ tầng chi tiết chỉ dành cho admin. RAM trống dưới 2 GB hoặc ổ cấu hình còn dưới mức lớn hơn giữa 10 GiB và ngưỡng bắt đầu tác vụ sẽ có cảnh báo. Máy chủ hiện giới hạn một công đoạn nặng; giao diện không tự thay đổi hạn mức, xóa tệp hay gửi yêu cầu dịch vụ AI.
+---
 
-### Nếu cài trên máy mới
+## Quy trình làm video
 
-Cần Python 3.12, các thư viện trong `requirements.txt`, FFmpeg và FFprobe. VideoSubFinder hỗ trợ tìm chữ; các chức năng AI cục bộ cần thêm công cụ và model tương ứng. Những gói này có thể chiếm nhiều dung lượng vì là thành phần vận hành.
+### 9 Bước tiêu chuẩn trong Studio
 
-Trong thư mục dự án, người cài đặt có thể chạy:
+1. **Nguồn:** Nhập liên kết (Douyin, Bilibili) hoặc đường dẫn tệp video máy tính; kiểm tra tiêu đề, thời lượng và thông tin nguồn.
+2. **Tải Media:** Tải luồng video/âm thanh mà nguồn cung cấp, ghép và kiểm định media. Bilibili ưu tiên chất lượng 1080p theo cấu hình khi nguồn và quyền tài khoản cho phép; nhánh DASH có thể tải hình/tiếng riêng. Tải theo byte range và nối tiếp chỉ dùng khi máy chủ nguồn hỗ trợ và dữ liệu kiểm tra hợp lệ. MP4 thành phẩm được mã hóa H.264/AAC.
+3. **Vùng ROI:** Kéo chuột khoanh vùng phụ đề tiếng Trung trên khung hình xem trước, hoặc chọn **Tự động dò Sub** / **Preset Đáy**. Nếu video không có phụ đề cứng, chọn bỏ qua ROI để chuyển sang nghe giọng nói.
+4. **Bóc phụ đề / Lời thoại:** Bóc chữ phụ đề bằng RapidOCR (kèm VideoSubFinder) hoặc nhận dạng lời thoại bằng Whisper nếu video không có sub cứng. Duyệt các câu nghi vấn trước khi dịch.
+5. **Dịch tiếng Việt:** Dịch nghĩa bằng Gemini batch kèm cơ chế sliding context, bộ nhớ cache và chia lô song song với HY-MT / Azure.
+6. **Che & Sub Việt:** Chọn kiểu mờ tự nhiên hoặc hộp che sub gốc, chọn mẫu chữ, màu sắc, cỡ chữ và vị trí hiển thị phụ đề Việt.
+7. **Tạo giọng đọc:** Chọn giọng đọc AI, tốc độ, căn timeline theo video với cơ chế `cluster-budget-v1` và kiểm tra độ trôi âm thanh.
+8. **Render:** Kết xuất video thành phẩm 1-pass bằng GPU NVENC (hoặc CPU dự phòng), ghép phụ đề và hòa trộn âm thanh.
+9. **Nghiệm thu QA:** Kiểm tra các chỉ số kỹ thuật tự động (độ dài video, độ to âm thanh LUFS, đỉnh âm lượng TruePeak, độ trôi phụ đề) và nghe/xem lại video hoàn chỉnh.
+
+Khi mục tiêu có lồng tiếng, Auto dừng ở **Tạo giọng đọc** nếu còn câu lệch timing. Xem các câu được đánh dấu, sửa lời hoặc thiết lập giọng rồi tiếp tục Auto. Chọn mục tiêu chỉ làm phụ đề nếu bạn muốn xuất bản giữ tiếng gốc.
+
+### Lựa chọn Mục tiêu video (Video Goal)
+
+Trong **Dự án mới**, chọn **Thành phẩm** rồi chọn **Nguồn để dịch**. Dùng **Đọc chữ trên hình** cho video có chữ Trung rõ, hoặc **Nghe lời thoại** cho video không có phụ đề rõ. **Chỉ lồng tiếng Việt · giữ hình gốc** dùng chữ Trung trên hình. Các mục Tùy chỉnh và Hybrid vẫn có trong Studio. Bước 8 có mô tả riêng cho từng chế độ mã hóa.
+
+Ở màn hình tạo dự án mới hoặc trong Studio, hãy chọn mục tiêu phù hợp với nội dung:
+
+- **Chữ trên hình → sub Việt (`screen_subtitles`):** Đọc phụ đề cứng bằng OCR, dịch và ghép sub Việt, dùng âm thanh nguồn và bỏ qua tạo giọng. AAC vẫn qua kiểm định và có thể được hiệu chỉnh.
+- **Lời nói → sub Việt (`speech_subtitles`):** Whisper nghe âm thanh gốc, dịch và đặt sub Việt ở dưới; không quét OCR, giữ tiếng gốc, không gọi TTS.
+- **Chữ trên hình → giọng + sub (`screen_dub`):** OCR phụ đề cứng, dịch sang tiếng Việt, tạo giọng đọc AI lồng tiếng và trộn cùng âm thanh nền.
+- **Chỉ lồng tiếng Việt · giữ chữ Trung (`screen_voice_only`):** Dán link, chọn **Chỉ lồng tiếng Việt · giữ hình gốc** ở màn hình Dự án mới và bấm **Bắt đầu xử lý tự động**. Studio đọc chữ Trung trên hình, dịch để tạo giọng, rồi xuất MP4 giữ chữ gốc và trộn giọng Việt với nền. Chọn vị trí hoặc tắt logo NpzzSub ở phần xem trước nguồn. Bản dịch vẫn có trong Studio để duyệt. Tải MP4 ở tab **Nghiệm thu**.
+- **Lời nói → giọng + sub (`speech_dub`):** Whisper nghe lời thoại tiếng Trung, dịch, tạo giọng đọc AI và hòa trộn âm thanh.
+- **Hybrid thử nghiệm: đối chiếu lời nhạc / thoại (`hybrid_dub`):** Dùng VAD để hỗ trợ chọn ứng viên rồi đối chiếu ảnh/tiếng bằng hai model. Chỉ chuyển cue OCR sang phụ đề không giọng khi đủ bằng chứng đó là lời hát và không có thoại nói. VAD không tự phân biệt chắc chắn lời hát với lời thoại; cue chưa rõ hoặc lỗi provider vẫn được giữ để xử lý.
+- **Tùy chỉnh (`custom`):** Tự do lựa chọn từng công đoạn bóc tách và âm thanh theo ý muốn.
+
+### Cấu hình Tốc độ xử lý / Chất lượng hình
+
+- **Nhanh (`fast`):** NVENC p4 / CQ 22 (CPU dự phòng: veryfast / CRF 21).
+- **Cân bằng (`balanced` - Mặc định trên giao diện tạo dự án):** NVENC p5 / CQ 20 (CPU dự phòng: fast / CRF 20).
+- **Chất lượng hình cao (`quality`):** NVENC p6 / CQ 18 (CPU dự phòng: medium / CRF 18).
+
+*Lưu ý:* Cả 3 mức profile trên chỉ thay đổi tham số nén video của FFmpeg, giữ nguyên 100% độ khắt khe của các bước quét OCR, duyệt nghĩa, tạo giọng và kiểm định QA kỹ thuật.
+
+API không truyền `processing_profile` có thể giữ preset đã lưu; `RenderConfig` mới mặc định `p4`. Chế độ giữ hình gốc vẫn có thể mã hóa lại hình và hiệu chỉnh AAC; “giữ hình gốc” chỉ việc giữ chữ/nội dung hình nguồn, không cam kết sao chép nguyên luồng video hoặc giữ nguyên từng byte.
+
+---
+
+## Bóc tách phụ đề và kiểm tra nguồn
+
+### 1. Quét chữ và bóc tách hardsub
+
+- Tệp ảnh nguồn thô dùng chung giữa hai nhánh đối chiếu có trần `OCR_SOURCE_SPOOL_MAX_BYTES` mặc định 2 GiB, đồng thời chừa khoảng trống dự phòng ổ đĩa. Nếu tổng ảnh ước tính vượt trần (hoặc ảnh thực lớn hơn dự toán), dùng các lô nhỏ hiện có thay cho giữ toàn bộ ảnh nguồn. Không bỏ cue/ảnh đối chiếu, không giảm số lượt đồng thuận. Đổi lại có thể phải giải mã lại một số khung giữa hai nhánh để tránh đầy ổ.
+
+- Bộ lọc proxy dùng `VSF_PROXY_FILTER_THREADS=1` mặc định để giới hạn tranh CPU trên máy ít lõi; vẫn giữ bộ lọc `scale`, FPS và tham số mã hóa. Có thể cấu hình 1–16 luồng sau khi đo trên máy thực. Proxy hoàn tất có manifest riêng gắn nguồn/phạm vi/cấu hình/binary FFmpeg và SHA-256 đầu ra. Khi hủy hoặc thiếu tài nguyên trong lúc quét, lần sau dùng lại proxy chỉ nếu identity và checksum khớp; tệp dở dang không được dùng lại. Quét chưa hoàn tất vẫn phải quét lại, không coi ảnh đang sinh là checkpoint hoàn thành. Proxy được dọn sau lượt thành công hoặc khi đã có manifest quét hoàn tất hợp lệ.
+- Nếu worker RapidOCR GPU lỗi giữa lượt đọc ảnh VSF, giữ các cue/ảnh đã nhận dạng hợp lệ và chuyển ảnh đang lỗi cùng phần còn lại sang CPU; không bắt CPU đọc lại toàn bộ tiền tố. Cache kết quả CPU không được ghi dưới identity GPU. Báo cáo `rapidocr_pass.json` ghi số ảnh thực nhận dạng theo engine và số lần chuyển dự phòng. Thiếu RAM/VRAM/commit của Windows vẫn có thể làm worker lỗi; việc phục hồi không phải cam kết GPU luôn dùng được.
+
+- Studio chọn vùng phụ đề (ROI). Khi bật `VSF_USE_SCAN_PROXY` và nguồn rộng hơn `VSF_PROXY_WIDTH` (mặc định 960 px), FFmpeg giải mã và thu nhỏ bằng bộ lọc `scale` để giữ điểm ảnh dùng cho OCR. FFmpeg ưu tiên `h264_nvenc -preset p1` sau khi thử bộ mã hóa thực tế, rồi dùng `libx264 -preset ultrafast -crf 28` khi NVENC không dùng được. Proxy bỏ tiếng và không đặt tham số giảm FPS. Nếu không tạo được proxy, bộ quét dùng video gốc. MP4 thành phẩm lấy hình từ nguồn.
+- Lượt quét đã hoàn tất có thể dùng lại trong cùng dự án khi nguồn, mốc cắt, ROI, phiên bản bộ quét, thiết lập và số ảnh khớp manifest. Tạo dự án mới có thể phải quét lại cùng video. Đối chiếu ảnh nguồn xét toàn bộ cue đủ điều kiện và ghi checkpoint theo lô 12 câu. Nhánh Trung/Anh và nhánh vùng chữ chung dùng chung một lịch đọc theo chỉ số khung hình tăng dần. Tệp tạm chỉ giữ điểm ảnh vùng phụ đề phục vụ cả hai nhánh và được đóng sau đối chiếu. Chỉ dùng lại checkpoint khi nguồn, ROI, bộ nhận dạng, phiên bản và nội dung cue khớp; các kết quả đã hoàn tất trong lượt bị ngắt có thể tiếp tục.
+- RapidOCR đọc từng ảnh đã quét và tắt phân loại xoay chữ 180° cho quy trình phụ đề ngang. Ảnh liền kề giống hệt có thể kéo dài cue hiện có trong cửa sổ thời gian cho phép. Cụm ký tự Latinh ngắn, lặp, nằm trong một hộp nhỏ và chỉ đọc được trên ảnh thô có thể được gắn cờ duyệt thay vì đưa thẳng vào dịch. Cache OCR dùng chung theo nội dung ảnh, ngôn ngữ và phiên bản bộ nhận dạng.
+- `OCR_DEVICE=auto` chọn runtime CUDA đã kiểm định khi khả dụng. Khi GPU gặp lỗi được nhận diện trong lúc đọc lại ảnh đối chiếu, Studio thử lại ảnh đó bằng CPU.
+- Studio hiện tên pha và tiến độ Bước 4/9 cho proxy, VideoSubFinder, RapidOCR, đối chiếu đa khung và từng cửa sổ âm thanh. Hồ sơ `OCR_READY` liên kết các báo cáo có sẵn của lượt chạy. `vsf_proxy` ghi thời gian và đường mã hóa thực tế, `vsf_process` ghi cờ quét và số ảnh, còn `rapidocr_pass` ghi thời gian, số ảnh, lượt lọc trùng và cache.
+
+### 2. Kiểm định nguồn đa góc nhìn (Source Consensus)
+
+Điểm tin cậy OCR cao không đồng nghĩa đó là lời thoại; biển hiệu quảng cáo, tên phim, logo kênh, watermark (`原创@...`) có thể được nhận dạng rất nét. Hệ thống áp dụng các lớp phòng vệ:
+
+- **Đối chiếu 6 góc nhìn (Six-view Consensus):** Mỗi câu nghi vấn được đối chiếu tại 3 khung hình độc lập (25%, 50%, 75% thời lượng cue) nhân với 2 cách xử lý ảnh (ảnh gốc và ảnh tăng tương phản); cả 6 lượt đọc đều phải khớp cùng nội dung với độ tin cậy $\ge 90$ mới tự động xác nhận.
+- **Tách chữ Latinh/ASCII trên áo hoặc vật thể:** Khi hình ảnh có lẫn chữ in áo/vật cảnh với phụ đề tiếng Trung, hệ thống chỉ tách chữ Latinh khi có đủ 6 lượt đọc OCR $\ge 90$ xác nhận cùng dòng chính và bố cục chữ phụ phù hợp; khoảng trắng được chuẩn hóa nhưng bảo vệ toàn bộ chữ Hán và chữ số.
+- **Nhánh glyph trắng cho phụ đề ngắn:** Đối với các phụ đề ngắn 2–4 chữ CJK có viền hoặc nền phức tạp, bộ lọc ngưỡng màu trắng cố định (threshold 170 + 3x resize) hỗ trợ bóc tách chính xác mà không làm mất dấu phủ định.
+- **Chú thích tiếng cười không lời (`caption_role=nonverbal_laughter`):** Những câu phụ đề chỉ gồm các âm cười lặp (ví dụ `嘿嘿嘿`, `哈哈哈`) sau khi qua kiểm định nguồn sẽ được gắn nhãn này. Hệ thống giữ phụ đề trên video, không sinh giọng đọc TTS nhân tạo và không hạ âm lượng gốc tại đoạn đó.
+
+### 3. Đối chiếu chữ với âm thanh gốc tiếng Trung (STT Recheck)
+
+- Khi bật `OCR_AUDIO_RECHECK`, FFmpeg giải mã một tệp PCM tạm với `STT_AUDIO_FILTER`. Studio cắt từng cửa sổ từ PCM và đối chiếu những cue còn nghi vấn. Model lấy từ `OCR_AUDIO_MODEL_DIR` nếu được cấu hình, từ bản large-v3-turbo cục bộ đã kiểm định nếu có, hoặc từ bản small trên máy.
+- Mỗi ứng viên được đối chiếu với ba ảnh lấy ở 25%, 50% và 75% thời lượng câu, mỗi ảnh đọc theo hai cách tiền xử lý. Các câu thiếu bằng chứng vẫn cần duyệt. Nếu model nghe không nạp được, báo cáo ghi trạng thái không khả dụng và giữ các câu chưa xác minh.
+- Studio giải phóng worker OCR hoặc session ONNX của nhánh CPU trước pha nghe. Khi Whisper cho phép CUDA, Studio kiểm tra VRAM còn trống và kiểu tính toán của runtime (tối thiểu 3.500 MiB cho model lớn hoặc 2.000 MiB cho small). Với CPU, nếu còn dưới 4 GiB RAM vật lý hoặc không đọc được dung lượng, Studio chọn small trước khi nạp model lớn. CPU dùng `int8` với bốn luồng. Một tiến trình giữ model suốt lô cửa sổ, dùng khối encoder tối đa 10 giây, `beam_size=1`, `best_of=1`, `temperature=0.0` và mốc từng từ. Nếu CUDA lỗi hoặc model CPU được cấu hình thiếu bộ nhớ, thử small CPU đã có trên máy. Báo cáo ghi tên model và thiết bị thực tế. Các cửa sổ âm thanh gần nhau được dùng chung khi tổng thời lượng không quá 15 giây; cửa sổ dài được chia có đệm chồng. Các kết quả nghe được lưu theo từng cửa sổ trong khi worker hoạt động, và chỉ tái sử dụng khi nguồn, cửa sổ PCM, model, runtime, mã nhận dạng và thiết lập khớp. Lỗi một cửa sổ của model dự phòng giữ cue đó chờ xử lý và tiếp tục các cue khác. Đối chiếu cắt lời theo mốc từng cue và chọn dòng CJK ổn định, tách khỏi hộp chữ phụ. Lời khớp cần đạt độ tin cậy trung bình của chuỗi và độ giao thời gian. Nếu sáu lượt OCR cùng mặt chữ và khớp chính xác lời có mốc từng từ, chấp nhận OCR từ 78 điểm; so khớp Pinyin vẫn yêu cầu 90 điểm. So chữ Hán và âm tiết Pinyin không dấu theo thứ tự, có thể thiếu tối đa hai âm ở mép câu. Ngưỡng Pinyin là 75%, có chữ trùng làm điểm tựa và giữ nguyên phủ định, số, đơn vị, lượng từ cùng cụm đầu có dấu hiệu tên riêng. Khi bật đối chiếu tiếng, chỉ các cue còn chờ duyệt được bàn giao ba khung, mỗi khung đọc hai cách trên toàn ROI, kể cả khi vùng dòng chính chưa ổn định. Kiểm tra ảnh vẫn cần đủ sáu lượt đồng thuận để xác nhận câu. Bước nghe dùng lại checkpoint cùng nguồn, ROI, bộ nhận dạng và mốc cue, chỉ mở video nếu thiếu bằng chứng. Đoạn ASCII ngắn hoặc nhiễu hộp chữ nhỏ chỉ có trên ảnh thô được loại với mã `non_cjk_scene_texture_noise` sau một lượt nghe thành công và sáu góc nhìn, trừ trường hợp cả sáu lượt đạt 92 điểm và lời nói khớp. Đoạn CJK không có lời độc lập và thiếu dòng chữ chính ổn định có thể được loại với mã `one_off_no_speech_noise`. Mảnh chuyển cảnh còn được kiểm tra theo mốc các câu liền kề và chữ lặp. Chữ số hoặc ASCII ở rìa được tách khi lời nói có mốc khớp phần lõi và ảnh nguồn xác nhận đúng phần lõi. Đầu câu kèm đơn vị được bảo vệ. Với dòng CJK ổn định trong vùng phụ đề, đối chiếu có thể dùng bốn trên sáu lượt, bao gồm cả hai lượt giữa câu và trung bình từ 85 điểm. Khớp từng chữ, Pinyin hoặc chuỗi con liên tiếp hỗ trợ xác nhận khi có bằng chứng hình ảnh và số, phủ định nhất quán. Thán từ một chữ được xác nhận khi lời có mốc khớp, hoặc loại khi thiếu lời độc lập. Cue không đủ bằng chứng xác nhận hoặc loại vẫn xuất hiện ở bước duyệt. Cue loại có bằng chứng ghi mã lý do vào báo cáo QA. Text phục hồi được ghi vào corrected_text để Bước 5 dùng đúng dòng thoại. Báo cáo `audio_recheck/report.json` tách `speech_phase_seconds` và `visual_phase_seconds`, ghi số cửa sổ (`speech_windows`), số tiến trình nghe (`speech_processes`) và số cache có sẵn trước lượt chạy (`speech_preexisting_cache_hits`).
+
+### 4. Bộ nhớ học OCR (OCR Learning)
+
+Thư mục `learning/` lưu trữ các luật suy luận (`rules.md`) và nhật ký sửa lỗi trích xuất từ database (`corrections.jsonl`). Bạn có thể chạy công cụ quản lý:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-.\start_server.bat
+python scripts/ocr_learning.py inventory
+python scripts/ocr_learning.py analyze --project MA_DU_AN --evidence-limit 3
+python scripts/ocr_learning.py replay
 ```
 
-Chỉ sao chép `.env.example` khi **chưa có** `.env`, tránh ghi đè cấu hình đang dùng. Nếu FFmpeg/FFprobe không nằm trong PATH, điền đường dẫn vào `FFMPEG_PATH` và `FFPROBE_PATH` trong `.env`. File này chứa cấu hình riêng, không gửi công khai.
+---
 
-Model, giọng đã đăng ký và thông tin đăng nhập không tự xuất hiện trên máy mới chỉ bằng việc chép mã nguồn.
+## Điều phối dịch thuật đa nguồn & Quản lý API Key
 
-### Dùng máy này làm server cho 1–2 máy khác
+### 1. Cơ chế chia lô song song (`parallel-provider-batches-v1`)
 
-**Chia sẻ và đăng nhập:** mở **Quản lý máy chủ → Chia sẻ truy cập**, chọn địa chỉ LAN rồi bấm **Sao chép link đăng nhập**. Người nhận phải dùng cùng mạng và đăng nhập bằng tài khoản đã cấp. Không gửi địa chỉ `127.0.0.1` cho máy khác vì đó là chính máy của người mở link.
+Quy trình dịch tự động tối ưu hóa tốc độ và giảm áp lực quota:
 
-Muốn người nhận tự đặt mật khẩu, nhập tên tài khoản mới và chọn quyền **Người dùng** hoặc **Người xem**, rồi bấm **Tạo link mời 24 giờ**. Sao chép link hiện ra và gửi riêng cho người nhận. Link chỉ dùng một lần; tạo lại lời mời cùng tên sẽ hủy link trước đó. Có thể thu hồi lời mời chưa sử dụng ngay trong mục này. Người nhận đặt và xác nhận mật khẩu tối thiểu 12 ký tự; kích hoạt thành công sẽ đăng nhập luôn. Tài khoản đã có vẫn dùng link đăng nhập thường; admin quản lý mật khẩu/quyền trong mục Tài khoản.
+- **Model chính:** Gemini (mặc định `gemini-3.5-flash-lite`; dự phòng `gemini-3.1-flash-lite`, `gemini-3.8-flash`, `gemini-3.6-flash`).
+- **Model sửa lỗi nghĩa / vượt token:** `gemini-3.8-flash`.
+- **Chia lô song song khi có từ 20 câu đại diện khác nhau cần dịch:** Khi bật điều phối đa nguồn và provider đã khả dụng, hệ thống tách một lô thử tối đa 4 câu cho HY-MT cục bộ (`http://127.0.0.1:8091/v1`), một lô thử tối đa 16 câu cho Azure Translator, trong khi Gemini dịch các lô còn lại. Câu trùng được gom trước khi tính ngưỡng này. Launcher cá nhân có thể khởi động HY-MT khi đủ runtime/model cục bộ.
+- **Bảo toàn bộ nhớ dịch (`TranslationMemory`):** Khi một nguồn gặp lỗi mạng hoặc hết hạn mức giữa chừng, các câu đã dịch hợp lệ lập tức được ghi vào bộ nhớ đệm. Bản dịch hợp lệ của từng lô, kể cả lô lấy từ cache, được commit ngay vào SQLite và cập nhật checkpoint. Lượt bị ngắt tiếp tục từ các cue còn thiếu; lỗi ghi database được trả ra rõ ràng. Chỉ những câu chưa xong mới được chuyển giao cho nhà cung cấp dự phòng tiếp theo hoặc quay lại Gemini.
 
-Màn hình đăng nhập có nhãn máy chủ và nút hiện/ẩn mật khẩu. Nếu quên mật khẩu, liên hệ admin. Link mời không cấp quyền quản trị; muốn bổ sung admin, quản trị viên hiện tại phải chủ động tạo/cập nhật tài khoản trong mục Tài khoản.
+- **Cứu câu dịch lỗi khi Auto bật tự chốt:** Sau các lượt sửa giới hạn, thử làm sạch chuỗi Việt còn lẫn chữ Hán, dịch riêng cue và từ vựng dự phòng cho câu ngắn. Mỗi bản được cứu có mã lý do và cảnh báo kiểm nghĩa. Nguồn chỉ còn ký hiệu rác có thể được loại với `untranslatable_ocr_noise` và báo cáo theo SHA-256 nguồn. Ký tự CJK ở câu trả về là lỗi parser `invalid_translation`; bộ kiểm tra nghĩa nhận diện riêng câu hỏi cuối 不/没 và A不A.
+- **Theo dõi phản hồi cần sửa:** Auto ghi phản hồi mỗi lượt vào `translation_attempts` trong dự án để phân tích lỗi cấp câu. Nhật ký API chung vẫn chỉ lưu trạng thái, token và thời gian.
 
-Địa chỉ từ xa cố định được cấu hình bằng `SERVER_PUBLIC_URL=https://studio.ten-mien-cua-ban/` trong `.env`, sau khi đã tạo đường hầm/reverse proxy HTTPS trỏ tới `http://127.0.0.1:8088`. Khởi động lại server để nạp hostname chính xác vào allowlist và ưu tiên địa chỉ này trong phần chia sẻ. Không dùng wildcard `*`. Cookie cấp qua HTTPS tự được đánh dấu Secure; các yêu cầu ghi vẫn kiểm tra Origin và CSRF. Chỉ điền URL không tự tạo đường hầm hoặc DNS.
+### 2. Quản lý Pool API Key & Dự án Google Cloud
 
-Máy chủ cần bật khi làm việc. Link LAN phụ thuộc mạng và Windows Firewall; nút sao chép không xác nhận kết nối từ máy khác. Để dùng khác mạng cần tên miền HTTPS, đường hầm/reverse proxy và cấu hình hostname được phép tương ứng; tính năng mời không tự mở cổng Internet.
+Trong cửa sổ **Quản lý API Key**:
+
+- Mỗi model có nhãn trạng thái riêng: phân biệt rõ giữa hết quota ngày (429), giới hạn số lượt gọi/phút (RPM), và lỗi máy chủ tạm thời (503/504), kèm thời gian tự động mở khóa.
+- Nút **Project ID** cho phép gán mã Google Cloud Project cho từng key để chia sẻ hạn mức chính xác theo cụm.
+- Giới hạn thời gian chia nhỏ lô: Các yêu cầu dịch có thể chia nhỏ (splittable batch) được khống chế trần thời gian 30 giây để đảm bảo nếu cần chia tách thì các batch con vẫn còn đủ thời gian xử lý trong tổng deadline.
+
+---
+
+Ngân sách lời đọc Bước 5 hiệu chỉnh theo profile giọng truyền vào (`VOICE_SPEECH_RATES`: ví dụ `piper:ngochuyen` = `4,45`, `piper:banmai` = `4,15`, `piper:vais1000` = `3,85` nhân hệ số tốc độ, fallback `4,0` kẹp `3,6–5,8` đơn vị/giây) và trừ độ trễ dấu câu / nhóm chữ số trước khi phân bổ nhịp nói. Cue dưới 2 giây nối câu kế tiếp cách dưới 0,15 giây dùng biên an toàn 0,82; các cue khác dùng 0,90. Các mảnh OCR ngắn liền kề `0,3–0,85s` trong cùng một câu (không cắt qua dấu kết câu, người nói hoặc phủ định độc lập) được gộp thông minh bằng `coalesce_short_cues` trước lượt dịch. Cache dịch phân biệt ngân sách và profile giọng nói này.
+
+Bước 7 giữ lại các đề xuất đã kiểm nghĩa thành công nếu nhóm sau lỗi provider; câu chưa xác minh giữ nguyên. Pha phục hồi timing tự động có ngân sách chung `min(600, max(90, thời_lượng_nguồn × 1.5))` giây, bắt đầu khi phát hiện lịch chưa đạt. Hết ngân sách sẽ yêu cầu duyệt tay, không render vượt QA. Không thử tiếp rút gọn cùng đầu vào khi toàn bộ đề xuất bị precheck loại. Các ngưỡng QA và trần tốc độ 1,30x giữ nguyên.
+
+## Tạo giọng đọc & Căn chỉnh Timing Bước 7
+
+### 1. Các bộ đọc AI tích hợp sẵn
+
+Ứng dụng hỗ trợ đa dạng cả giọng đọc offline tốc độ cao và giọng online:
+
+- **Piper TTS (Offline ONNX Runtime; bộ đọc mặc định):**
+  - `piper:ngochuyen`: Ngọc Huyền (Nữ Review Phim; giọng mặc định trong cấu hình).
+  - `piper:banmai`: Ban Mai (Nữ Miền Bắc thanh thoát).
+  - `piper:lacphi`: Lạc Phi (Nam Trầm Kiếm Hiệp cổ trang).
+  - `piper:chieuthanh`: Chiêu Thanh (Nam Miền Nam ấm áp).
+  - `piper:manhdung`: Mạnh Dũng (Nam Phóng Sự tin tức).
+  - `piper:vais1000`: VAIS 1000 (Chuẩn Ngữ Âm).
+- **VieNeu TTS (`vieneu:ngoc_huyen_review_phim`):** Chạy GPU NVIDIA CUDA FP32 độc lập (`tools/vieneu-gpu`) hoặc CPU. Mặc định giữ `VIENEU_BATCH_SIZE=1` để đảm bảo ngữ điệu và nhịp ngắt chuẩn xác.
+- **Edge-TTS (Online miễn phí):** `vi-VN-NamMinhNeural` (Nam Minh), `vi-VN-HoaiMyNeural` (Hoài My).
+
+### 2. Cắt quãng lặng tự nhiên & Xử lý âm thanh
+
+- `TTS_TRIM_SILENCE=true`: Tự động loại bỏ khoảng lặng thừa ở đầu và đuôi câu do engine TTS sinh ra.
+- Timeline dùng ngưỡng RMS để cắt khoảng lặng, rồi chỉ cắt phần đệm PCM bằng 0 còn thừa ở hai mép; `TTS_TRIM_KEEP_MS=60` quy định đệm giữ lại ở bước PCM. Nhánh Edge-TTS còn có bước cắt theo biên độ trước khi tạo timeline. Cần nghe lại đầu/đuôi câu để phát hiện âm bị cụt.
+
+### 3. Thuật toán căn giọng toàn cục Bước 7 (`cluster-budget-v1`)
+
+Hệ thống căn lời Việt theo mốc cue và kiểm tra giới hạn timing; mức tự nhiên vẫn cần nghe lại:
+
+- **Xếp lịch theo mẫu đo thực trước (Schedule First):** Hệ thống tạo file WAV theo giọng và tốc độ đã chọn trước, đo đạc độ dài mẫu thật rồi giải bài toán xếp lịch toàn cục nhằm tối thiểu hóa độ trôi (hard gate: độ trôi trung bình $\le 0,3\text{ s}$, độ trôi tối đa $\le 1,5\text{ s}$, khoảng nghỉ tối thiểu $40\text{ ms}$).
+- **Bậc tăng tốc lượng tử hóa:** Chỉ tăng tốc từng phần khi thực sự cần thiết, so sánh trực tiếp các tỷ lệ tốc độ lượng tử hóa (trần tốc độ tối đa không quá $1,30\times$).
+- **Phục hồi lịch:** Bộ xếp lịch theo cụm dùng khoảng lặng hoặc cửa sổ cùng người nói khi có bằng chứng phù hợp. Với chế độ Trộn có mức nền từ 0 đến 0,15, bộ xếp lịch WAV có thể thử dịch vị trí câu trong giới hạn QA và thời lượng nguồn. Giới hạn độ lệch dùng mốc gốc của cue.
+
+- **Phục hồi lời quá dài (Timing Recovery):** Thử tối đa 3 chiến lược rút gọn khác nhau (súc tích, đổi cấu trúc, diễn đạt lại). Mọi lượt đều kiểm tra phủ định, số lượng, điều kiện, phạm vi, thuật ngữ, xưng hô và dấu hiệu không chắc chắn, rồi kiểm nghĩa với nguồn và các cue liền kề. Giữ câu hiện tại nếu đề xuất bị loại hoặc chưa xác minh. Khi vẫn không đạt timing, Auto dừng ở bước cần duyệt và giữ checkpoint. Giới hạn drift và tốc độ áp dụng trên WAV đo thực tế.
+- **Xếp lịch nhiều nghìn câu:** `minimum_drift_witness` gom tối thiểu 64 câu rồi chỉ tách LP tại biên độc lập được chứng minh bằng cửa sổ đặt giọng thực tế (đã gồm `max_drift` và giới hạn cuối nguồn). Không chỉ dựa vào khoảng cách phụ đề. Trung bình drift vẫn được kiểm tra trên toàn video, không áp riêng từng khối. Mỗi LP con có giới hạn HiGHS 30 giây; solver source-window có 45 giây cho mỗi lượt tối ưu. Hết thời gian mà chưa chứng minh được nghiệm thì báo `solver_unproven`, không coi là đạt QA.
+- **Tra khoảng lặng và đo WAV:** Chỉ mục sắp xếp/bisect xử lý cả khoảng lặng chồng hoặc lồng nhau, tránh quét mọi khoảng cho từng câu. Bảng tra ID dùng khi tổng hợp cụm; vòng làm mượt tốc độ kiểm tra tín hiệu hủy từng cặp câu. Số mẫu để xếp lịch lấy từ `sf.info().frames`; kiểm tra âm thanh hữu hạn/không im lặng vẫn đọc theo khối 5 giây. Không bỏ kiểm tra nội dung WAV để đổi lấy tốc độ.
+- **Ghép video dài:** Các WAV được lắp vào PCM dạng memmap và ghi theo khối. Hệ thống không tạo dòng lệnh FFmpeg với hàng nghìn đầu vào WAV. Chú thích chỉ có dấu câu không yêu cầu giọng. Thán từ một chữ có WAV giải mã hợp lệ nhưng im lặng được lưu bằng chứng riêng và chuyển thành phụ đề không giọng.
+
+- **Tự động gộp cặp câu OCR liền kề (Adjacent Merge):** Khi có hai câu liền nhau đọc cùng một bản dịch, 2 model Gemini đồng thuận 6 crop ảnh và 1 câu nói, không lệch số/phủ định và vừa vặn timeline WAV, hệ thống sẽ tự động gộp thành một câu hoàn chỉnh.
+
+---
+
+## Che chữ mờ tự nhiên, Mẫu sub & Render video
+
+Thời hạn render, đo loudness, hiệu chỉnh AAC và probe đầu ra co giãn theo công thức `max(timeout_cố_định, int(thời_lượng_nguồn × 2.5) + 300)`. Metadata ban đầu dùng thời hạn nền có đệm khi chưa biết thời lượng. Video 7.200 giây có ít nhất 18.300 giây cho thao tác toàn luồng, video 10.800 giây có ít nhất 27.300 giây.
+
+### 1. Chế độ Mờ tự nhiên theo màu video (`preset:natural_blur`)
+
+Đây là mẫu mặc định trong danh sách mẫu phụ đề Việt.
+
+- Mẫu mờ tự nhiên trong Studio và Auto dùng chung cấu hình từ `RenderConfig` (mặc định `NATURAL_BLUR_PRESET` với mức mờ 24 khi chưa có `subtitle_settings.json` của dự án).
+- Phụ đề tiếng Việt chữ Arial trắng in đậm, viền đen sắc nét đặt chồng ngay ngắn trên dải mờ, mang lại cảm giác chuyên nghiệp như video gốc.
+
+### 2. Bộ sưu tập mẫu chữ và kiểu che phong phú
+
+Bạn có thể tùy ý chọn mẫu trong màn hình tạo dự án hoặc tab **Che & Sub Việt**:
+
+- 🟡 **TikTok Vàng Viền Đen (`preset:tiktok_yellow`):** Phông Montserrat Bold nổi bật, cực kỳ hút mắt trên video ngắn.
+- ⚪ **Trắng Hiện Đại Viền Đen (`preset:modern_white`):** Phông Montserrat thanh lịch, hiện đại.
+- 🎞️ **Review Phim Chuyên Nghiệp (`preset:review_anton`):** Phông Anton dày dặn, phong cách điện ảnh.
+- ⚔️ **Phim Cổ Trang / Kiếm Hiệp (`preset:cinematic_svn`):** Phông SVN-Times cổ điển.
+- 📷 **Phong Cách Reels / Instagram (`preset:instagram`):** Trẻ trung, năng động.
+- 🟡 **Che Tiêu Chuẩn (`cover`):** Hộp màu che kín sub cũ và đè sub mới.
+- ✨ **Sub Sạch (`clean`):** Dùng delogo trên vùng chữ gốc rồi chèn phụ đề Việt.
+- 🌐 **Phụ Đề Song Ngữ (`bilingual`):** Giữ chữ gốc và chèn phụ đề Việt theo vị trí bạn chọn.
+
+- **Preset nền tảng & Safe-Zone thương mại (`platform_preset`):** `RenderConfig` hỗ trợ `auto`, `ytb_16_9`, `fb_feed` (phụ đề tối đa 1–2 dòng, viền + đổ bóng, lề đáy $\ge 5\%$) và `tiktok_reels_9_16` (đẩy phụ đề và logo khỏi vùng UI đáy $\ge 22\%$, cột nút phải $\ge 15\%$, bề rộng dòng chữ $\le 85\%$ khung hình).
+- **Làm sạch đa vùng & LaMa 1-Pass ROI-crop:** `OverlayDetector` / `douyin_logo` dò watermark góc tĩnh/bật tắt và chữ phụ ngoài ROI (`secondary_caption`) kết hợp blur làm mượt viền (`alphamerge`). Khi bật `restore_captions=true`, worker LaMa chỉ xử lý dải ROI cắt gọn (`roi_patch.mp4`) rồi chồng một pass trực tiếp trong lệnh encode chính và giải phóng VRAM trước NVENC.
+- **Chuẩn hóa Encode & Keyframe cắt tập:** Video đầu ra chuẩn hóa `-pix_fmt yuv420p`, `-fps_mode cfr`, `-colorspace bt709 -color_primaries bt709 -color_trc bt709`, `-movflags +faststart` và chèn `-force_key_frames` (kèm `-forced-idr 1` khi dùng `h264_nvenc`) khớp các mốc `part_splits` của `publishing_pack` để cắt `-c copy` chuẩn keyframe.
+- **Chống Reused Content âm thanh & Platform Compliance Gate:** Âm gốc ở khoảng lặng giữ trần thấp đồng nhất (`bg_gap_ceiling=0.15`, không bật lại `1.0`), hỗ trợ tùy chọn **Vocal-Band Ducking** (`vocal_band_ducking=true`, cắt sâu dải thoại `300–3400 Hz` bằng FFmpeg EQ không tốn VRAM) và hòa âm nhạc nền sạch (`bgm_path`, `bgm_volume`); AI Stem Separation giữ tắt mặc định (`AI_STEM_SEPARATION_DEFAULT=false`). Cổng `src/pipeline/compliance.py` (`COMPLIANCE_GATE_ENABLED=true`) tự động chuẩn hóa từ ngữ nhạy cảm, loại CTA cấm và quét sạch ký tự Hán tự sót trước TTS, render phụ đề và gói đăng kênh.
+
+### 3. Vị trí phụ đề tiếng Việt
+
+Tùy chỉnh linh hoạt: Chồng lên vùng che, Sát phía trên, Sát phía dưới, Sát đáy khung hình, hoặc nhập độ cao tùy chọn (từ 0.0 mép trên đến 1.0 sát đáy).
+
+### 4. Kết xuất Render và kiểm định âm thanh
+
+Studio tạo `mastered_audio.m4a` đã chuẩn hóa loudness (`loudnorm=I=-14:TP=-2:LRA=11` ở cả `AUDIO_PREMASTER`), đo và hiệu chỉnh AAC trước khi encode hình. Lượt render ghép AAC nguyên vẹn bằng `-c:a copy`, tái sử dụng trực tiếp báo cáo `master_delivery` hợp lệ (chỉ đo lại MP4 khi chạy nhánh checkpoint/khôi phục cũ), và tái sử dụng mã SHA-256 giữa `render_checkpoint` và `audio_qc.json`. Các lượt hiệu chỉnh không tạo thêm MP4 lớn thứ hai. Checkpoint encode cũ không dùng lại sau thay đổi audio-first.
+
+Nếu sau các lượt chuẩn hóa, âm lượng đã đạt nhưng true peak của AAC còn vượt −1,5 dBTP, bộ hiệu chỉnh chuyển sang tối đa hai lượt limiter và đo lại AAC thực: encode lại từ đầu vào gốc bằng gain cố định cộng `alimiter` (trần mẫu 0,767361; lượt siết lại dùng 0,691831). Không dùng cách chỉ giảm gain thêm: đo trên dự án chẩn đoán cho thấy AAC vẫn overshoot (−1,28 dBTP sau khi nhắm −1,75), còn hạ trần loudnorm xuống −3,2 làm LUFS rơi khỏi cửa sổ. Ngưỡng −14,5…−13,5 LUFS và ≤−1,5 dBTP không đổi; nhánh thường và nhánh limiter ưu tiên cho video dài dùng cùng cơ chế. Nếu vẫn không đạt, giữ đầu vào và dừng; không xuất nhãn VERIFIED.
+
+Chọn **💾 Tiết kiệm dung lượng** ở Dự án mới hoặc Bước 8 để dùng `compact`: NVENC p5/CQ23 hoặc CPU fast/CRF23, maxrate 4500k, bufsize 9000k. Trần xử lý mặc định 6 giờ, tải 24 GiB; đây không phải cam kết đã nghiệm thu video 6 giờ trên máy 8 GB RAM. Upload server vẫn có giới hạn riêng.
+
+Trước tải và render, Studio kiểm tra chỗ trống trên ổ chứa dữ liệu và chừa 2 GiB dự phòng. Render ước tính theo profile, không bảo đảm bitrate thực tế hay tổng dung lượng mọi công đoạn. DASH còn cần đồng thời các track và MP4 mux; nguồn 24 GiB có thể bị từ chối trên ổ chỉ còn 30 GB. Hãy giải phóng đĩa hoặc chọn đoạn/nguồn nhỏ hơn khi báo thiếu chỗ.
+
+Sau Auto đạt `VERIFIED`, Studio dọn proxy/ảnh VSF tạm, PCM/window nghe và clip giọng trung gian; giữ nguồn, MP4, phụ đề và báo cáo. Muốn sửa giọng/render hoặc nghiệm thu lại sau khi clip bị dọn phải tạo lại giọng. Báo cáo đã lưu mô tả lượt nghiệm thu trước khi dọn, không chứng nhận các tệp đã xóa vẫn còn.
+
+Ở Bước 9, bấm **Đo dung lượng**, rồi **🧹 Giải phóng dung lượng (Giữ Sub & Kịch bản)** và xác nhận để xóa media của riêng dự án. Thao tác giữ bản ghi SQLite, SRT và JSON (gồm kịch bản, gói đăng kênh, báo cáo), không thể hoàn tác tệp đã xóa. Muốn xử lý lại cần tải/tạo lại media. Tệp bị khóa được báo để thử lại; không coi là đã thu hồi thành công.
 
 
-**Mở BAT lần nữa:** launcher kiểm tra tiến trình đúng thư mục dự án và API phiên đăng nhập. Nếu server đã sẵn sàng, BAT mở giao diện đang chạy rồi thoát thành công; không mở backend thứ hai. Nếu giữ khóa nhưng backend chưa sẵn sàng, thông báo yêu cầu đợi/đọc log. Không xóa `small_server.lock` hay kết thúc Python chỉ dựa vào tên tiến trình. Tệp khóa tồn tại không có nghĩa khóa hệ điều hành vẫn đang bị giữ.
+Render ghép các hiệu ứng hình trong một lượt FFmpeg chính. Bước kiểm định AAC sau mã hóa có thể tạo thêm lượt hiệu chỉnh âm thanh; không bảo đảm toàn bộ xuất video chỉ chạy FFmpeg một lần.
 
-Kiểm tra chỉ đọc, không khởi động/dừng server:
+- **Mã hóa phần cứng GPU NVENC:** Hỗ trợ profile p4 / p5 / p6 / compact khi bộ mã hóa chạy được trên GPU/driver hiện có.
+- **Tự động chuyển đổi CPU dự phòng:** Khi GPU bận hoặc gặp sự cố, hệ thống tự động chuyển sang mã hóa CPU libx264, giữ nguyên vẹn 100% tọa độ vùng che và phụ đề.
+- **Tra cứu thời gian phân đoạn (Interval Lookup):** Biểu thức vùng che được chia nhánh theo các khoảng thời gian để giảm việc xét vùng không hoạt động trên từng frame. Mức tăng tốc phụ thuộc video và số vùng che; không có hệ số tăng tốc chung cho mọi dự án.
+- **Ràng buộc mã băm âm thanh thành phẩm:** Báo cáo đo AAC (ngưỡng đạt từ −14,5 đến −13,5 LUFS và true peak không vượt −1,5 dBTP) được liên kết chặt chẽ với mã SHA-256 và `stat_stamp` (`st_dev`, `st_ino`, `st_size`, `st_mtime_ns`) của file MP4; bước QA đối chiếu dấu vết tệp (đối với bản xuất từ 1 MiB trở lên, hoặc kiểm trực tiếp SHA-256 nếu có thay đổi/tệp nhỏ) để tái sử dụng kết quả kiểm tra âm thanh mà không phải đọc/giải mã lặp toàn bộ MP4.
+
+QA đạt nghĩa là các cổng kỹ thuật áp dụng cho lượt xuất đã đạt. Mục **Duyệt nội dung** ở Bước 9 mở danh sách cue và mốc thời gian cho câu rút gọn mạnh, giọng có tốc độ hiệu dụng trên 1,20× và giọng nằm ngoài mốc phụ đề. Báo cáo JSON lưu cùng danh sách tại `content_review_items`. Kiểm lại nguồn ở các mốc được đánh dấu và xem/nghe MP4 trước khi đăng, kể cả khi không có cảnh báo tự động. Báo cáo lưu từ trước có thể chỉ có cảnh báo tổng hợp. Khi lập báo cáo mới, áp dụng điều kiện tạo lại giọng nếu clip trung gian đã được dọn.
+
+---
+
+### 5. Nghiệm thu và gói nội dung đăng kênh
+
+Tab **Nghiệm thu** hiển thị LUFS/TruePeak đo trên AAC thành phẩm (LUFS từ −14,5 đến −13,5; true peak không quá −1,5 dBTP), lỗi và cảnh báo của báo cáo QA. Không có số đo thì hiển thị chưa có báo cáo. Hai nút SRT tách **mốc theo giọng** (`vi.dub.srt`) và **mốc nguồn của bản dịch** (`vi.srt`); tệp chỉ tải được khi công đoạn tương ứng đã sinh ra. Link tải MP4, hai bản SRT Việt, SRT gốc, timeline và báo cáo QA được cập nhật theo dự án ngay khi mở/làm mới Studio, không cần chạy lại QA; chuyển dự án sẽ đổi link theo dự án mới.
+
+Trong khung **Đóng Gói Nội Dung Đăng Kênh**, bấm **Tạo Nội Dung Đăng Bài** để tạo ba tiêu đề tối đa 95 ký tự, mô tả YouTube/Shorts, bài Facebook và hashtag. **Tạo Lại** bỏ qua cache. Các nút Copy sao chép từng phần; nếu clipboard bị chặn, chọn văn bản và sao chép thủ công. Đây là bản nháp, cần kiểm tra nghĩa, quyền sử dụng và lịch đăng trước khi tự đăng lên kênh.
+
+Gói đọc cue từ SQLite qua `orchestrator.get_cues`, bỏ cue tiếng cười không lời. Gemini dùng key pool và ghi usage hiện có; offline, pytest, thiếu key, lỗi provider hoặc JSON không hợp lệ dùng `offline_rule` dựa trên trích đoạn thật, không tự suy ra tập phim/thể loại. Video quá dài vượt ngân sách prompt cũng dùng quy tắc nội bộ. Lịch đăng và thông tin kênh đọc động từ biến `.env` (`PUBLISHING_CHANNEL_NAME`, `PUBLISHING_CHANNEL_HANDLE`, `PUBLISHING_CHANNEL_URL`, `PUBLISHING_SCHEDULE`, `PUBLISHING_HASHTAGS`; mặc định **11:30 & 19:30**, kênh **@NpzzSub Review**); đây là nội dung bản nháp, không phải tác vụ lên lịch đăng.
+
+Chọn **Thời lượng mỗi tập** (2 / 3 / 5 / 10 phút; mặc định 3 phút; API cho phép số nguyên 60–900 giây) rồi tạo gói. `part_splits` chứa mốc bắt đầu/kết thúc, số cue, tiêu đề phần tối đa 95 ký tự kèm `char_count` và lệnh FFmpeg để Copy. Thời lượng là mục tiêu, không phải trần: bộ chia chọn khe gần mục tiêu trong ±45 giây, ưu tiên khe từ 0,15 giây; không có khe phù hợp thì phần có thể dài hơn. Không ép cắt cụm liên tục, tránh phần đuôi dưới 35 giây.
+
+Khoảng bảo vệ là bao của mốc phụ đề Việt hợp lệ và mốc giọng `actual_start..actual_end` trong `voiceover/timeline.json`; hợp nhất vùng chồng nhau trước khi chia. Luôn bỏ row `unplaced`, bỏ mốc không hữu hạn/sai thứ tự, làm tròn biên ra ngoài đến mili giây để không thu hẹp vùng bảo vệ. Thiếu timeline/mốc giọng thì chỉ bảo vệ mốc phụ đề và hiện cảnh báo; timeline tồn tại nhưng JSON hỏng phải được sửa hoặc tạo lại. Đây là khe theo metadata, **không phải phép đo im lặng âm thanh**, và chỉ xét cue đã dịch, không gồm chú thích tiếng cười không lời. Điểm cuối là cuối vùng nội dung hợp lệ, không phải thời lượng toàn bộ MP4; phần đuôi im lặng có thể nằm ngoài kế hoạch.
+
+`youtube_chapters` / `youtube_chapters_text` bắt đầu `00:00`, nhãn trích từ phụ đề thật, không quá 60 ký tự. Các mốc chương tăng ít nhất 10 giây và chỉ dùng giây nguyên còn nằm trong khe an toàn. Nếu các ranh giới phần chưa đủ, chọn thêm khe gần các mốc một phần ba/hai phần ba nội dung. YouTube yêu cầu ít nhất 3 mốc và mỗi chương, kể cả chương cuối, dài ít nhất 10 giây; không đủ thì gói giữ mốc tham khảo và hiện cảnh báo, không tự tạo điểm giữa câu. Xem [hướng dẫn YouTube](https://support.google.com/youtube/answer/9884579?hl=en).
+
+Nút **Copy Mốc Chương**, **Copy Tiêu Đề Phần** và **Copy Lệnh Cắt FFmpeg** chỉ sao chép nội dung. Lệnh `ffmpeg_copy_cmd` chạy từ thư mục dự án có `output/video_vi.mp4` (chế độ server dùng artifact pointer cần tải/copy MP4 thành phẩm về đúng đường dẫn này trước); khi render mới qua `render_one_pass`, hệ thống tự động chèn `-force_key_frames` khớp các mốc `part_splits` (với file đã xuất trước khi có cập nhật hoặc nguồn cắt ngoài luồng này, `-c copy` vẫn phụ thuộc keyframe có sẵn và nên kiểm tra lại đầu/cuối clip). Không có lệnh nào được tự chạy hoặc tự đăng bài.
+
+Artifact `output/publishing_pack.json` ghi nguyên tử, tải qua loại `publishing_pack`. Schema `publishing-pack-v2` kiểm tra cache theo phiên bản/chính sách, dự án, tiêu đề, cấu hình thương hiệu/lịch đăng, nội dung/role/mốc cue, mốc giọng hợp lệ và thời lượng chia mục tiêu; đổi nội dung hoặc thương hiệu làm gói cũ không còn hiển thị/tải qua API. Lỗi ghi tệp hoặc lưu usage vẫn trả lỗi. Không thay đổi model/schema/các cache dịch của Bước 5 hoặc cổng QA video.
+
+API: `GET /api/projects/{id}/publishing-pack?target_part_seconds=180` chỉ đọc, trả `{exists, pack}`; `POST` cùng đường dẫn nhận `{force: false, target_part_seconds: 180}` và trả gói đã tạo. Link tải `files/publishing_pack` cũng kèm `target_part_seconds` để kiểm tra đúng gói. Thao tác tạo yêu cầu dự án rảnh; GET/tải không gọi AI. Tạo gói không đòi MP4 đã QA và không chứng nhận chất lượng MP4.
+
+---
+
+## Khắc phục sự cố, Duyệt thủ công & Tiếp tục Auto
+
+### 1. Chốt nguồn tự động (`AUTO_SKIP_UNCERTAIN=true`)
+
+Auto chốt các cue còn nghi vấn khi có ba khung nguồn, hai lượt OCR trên mỗi khung và kết quả nghe có mốc từ. Bộ trọng tài ưu tiên dòng chữ Hán rõ ở giữa vùng phụ đề, sau đó xét lời Whisper đủ rõ trong mốc riêng, rồi ghi lý do loại các mảnh nhiễu hoặc trùng còn lại. Từng quyết định giữ hay loại có bằng chứng trong báo cáo đối chiếu và lịch sử dự án.
+
+- Cue khôi phục được dịch và tạo giọng. Cue loại theo bằng chứng được tính vào `excluded_cues_with_reason`. Thiếu dữ liệu ảnh hoặc lỗi nghe vẫn được báo để xử lý.
+- Tắt tùy chọn để giữ cổng duyệt thủ công. Chạy riêng Bước 4 dùng quy trình đối chiếu thông thường.
+- Chế độ làm phụ đề giữ tiếng gốc có thể bỏ qua bản dịch lỗi theo chính sách dịch. Auto lồng tiếng yêu cầu bản dịch và giọng cho các cue thoại còn lại.
+
+### 2. Nối tiếp luồng Auto sau khi duyệt bằng tay
+
+- Khi Auto dừng lại do cần duyệt OCR hoặc sửa câu dịch, bạn chỉ cần chỉnh sửa các câu được đánh dấu rồi bấm **Phê duyệt OCR** hoặc **Phê duyệt bản dịch**.
+- Nếu đã xử lý hết câu nghi vấn, ứng dụng sẽ tự động tiếp tục các công đoạn tiếp theo theo đúng thiết lập đã lưu, không cần phải bấm chạy từng bước riêng lẻ.
+- Khi Studio hiện **Tiếp tục toàn bộ Auto**, dùng nút đó để chạy tiếp bằng cấu hình đã lưu sau khi xử lý lỗi hoặc hoàn thành phần cần duyệt.
+
+### 3. Theo dõi chi tiết tại Tab Log
+
+Tab **Log** của dự án cung cấp thông tin minh bạch, chính xác từ cơ sở dữ liệu:
+
+- Tải tối đa 200 dòng `JobLog` mới nhất của chính dự án theo thứ tự thời gian.
+- Auto đã qua QA ghi công đoạn `VERIFIED` và tiến độ 100% cho job. Sau khi Studio cá nhân khởi động lại, lượt còn ghi `RUNNING` được đánh dấu gián đoạn và giữ trống thời điểm kết thúc nếu không đo được. Một lần chặn quá thời lượng ghi một lỗi `VIDEO_TOO_LONG`.
+- Phân biệt rõ 4 thành phần độc lập: **Log tác vụ đã lưu**, **Trạng thái tác vụ hiện tại**, **Mốc công đoạn đã lưu (Checkpoints)**, và **Cảnh báo chất lượng hiện tại**.
+- Bảng quan sát bất thường (`pipeline_observations`): Tự động lưu lại các sự kiện có cảnh báo hoặc chạy lỗi vào database để phục vụ công tác rà soát. Xuất báo cáo quan sát:
+  ```powershell
+  python scripts/report_pipeline_observations.py --output storage/maintenance/observations_YYYYMMDD.json
+  ```
+
+### 4. Phòng vệ tệp tin Windows (Atomic File Replace)
+
+- Các đường ghi dùng helper thay tệp nguyên tử thử tối đa 6 lần tổng cộng (lượt đầu và tối đa 5 lượt thử lại) khi gặp lỗi khóa tệp Windows (`WinError 5 / 32 / 33`). Nếu vẫn lỗi, hệ thống trả lỗi thay vì coi dữ liệu đã lưu thành công.
+
+---
+
+## Kho cloud tùy chọn: YouTube Private, Drive và Telegram
+
+**Truyền video lớn:** Drive và YouTube gửi tuần tự từng phần 8 MiB (bội số 256 KiB, phần cuối có thể nhỏ hơn), chỉ giữ một phần dữ liệu đang gửi trong bộ nhớ. Đây là chia yêu cầu truyền; MP4 gốc không bị cắt thành nhiều tập hoặc nén lại để upload. Khi mất kết nối hoặc gặp HTTP 429/500/502/503/504, hệ thống hỏi phiên tải đã nhận đến byte nào rồi gửi tiếp. Tối đa 5 lần phục hồi liên tiếp không tiến triển, với ngân sách 180 giây giữa các lần thử và chờ tăng dần có xét `Retry-After`; một request đang thực hiện vẫn chịu timeout mạng riêng. Hết ngân sách thì giữ phiên để người dùng tiếp tục, không lặp vô hạn. Hủy được kiểm tra giữa các request và trong lúc chờ. Lỗi quyền, checksum, sai phạm vi byte hoặc nguồn thay đổi không được coi là lỗi mạng để thử mù quáng. Drive vẫn kiểm tra kích thước/MD5 từ xa; YouTube cần biên nhận cuối xác nhận Private. Không tự gửi lại file Telegram khi chưa rõ lần gửi trước đã thành công hay chưa.
+
+Chế độ cá nhân cho phép cloud khi `OFFLINE_MODE=false`; chế độ offline chặn cloud. Cloud không tự bật sao lưu hệ thống server. Auto Disk Guard kiểm tra trước khi nhận link Telegram và chỉ tự giải phóng media của dự án đủ điều kiện bên dưới. Trong pytest, transport mạng Google/Telegram và polling nền bị chặn mặc định; các kiểm thử dùng transport giả lập chủ động.
+
+1. Mở **Kho cloud**, nhập Google OAuth JSON loại **Desktop app**, rồi kết nối Drive. Cấu hình/token được mã hóa DPAPI trên Windows; không chia sẻ JSON hay token. Google Cloud project cần bật Drive API và YouTube Data API v3; OAuth ở chế độ thử nghiệm cần thêm tài khoản của bạn làm test user.
+2. Chọn **Hồ sơ nhẹ** (mặc định): lưu các SRT có sẵn, `publishing_pack.json`, `verify_report.json` và `audio_qc.json` vào thư mục dự án trên Drive. Gói đăng kênh được tạo khi thiếu hoặc khi phiên bản lưu không còn khớp. Nếu tên nguồn sau khi lọc chỉ còn ký hiệu, nhãn `【AI】` hoặc chữ nối `vs`, gói dùng tên dự phòng **Video thuyết minh Việt**. Mỗi tệp phải khớp MD5/kích thước từ Drive trước khi ghi `output/drive_metadata_archive.json`. Khi lưu lại hồ sơ không đổi, kiểm tra lại checksum từ xa và dùng lại tệp đã lưu. Biên nhận MP4 đầy đủ tại `output/drive_archive.json` được giữ riêng, không bị gói nhẹ ghi đè. Gói này không chứa nguồn hay MP4. Chế độ **MP4 đầy đủ** giữ điều kiện đạt QA và kiểm tra byte gốc như trước; cần đủ dung lượng tài khoản Drive.
+3. Ở Bước 9, **Kết nối YouTube** dùng OAuth Desktop đã nhập nhưng scope upload và token được lưu riêng. Chọn tiêu đề rồi bấm **Đẩy Lên YouTube (Private)**. Tiêu đề bị giới hạn 95 ký tự; mô tả gồm chương, tag bỏ dấu #. Mọi upload đều yêu cầu `privacyStatus=private`. Upload theo chunk 8 MiB, lưu phiên mã hóa để tiếp tục sau gián đoạn/hủy. Chạy lại thao tác dùng phiên khớp nguồn/metadata/kết nối; không tự tạo upload mới khi phiên hết hạn để tránh tải trùng. API cho phép `force=true` khi người dùng chủ động muốn tạo bản khác.
+4. `output/youtube_upload.json` ghi video ID, liên kết Studio, SHA-256/kích thước MP4 đã gửi và thời điểm YouTube nhận video. YouTube có thể còn đang xử lý; biên nhận không chứng nhận hoàn tất xử lý/phát lại. YouTube mã hóa lại video, không phải kho giữ MP4 gốc khớp byte hay dung lượng vô hạn được bảo đảm. Video dài hơn 15 phút cần tài khoản phù hợp; giới hạn công bố là 256 GB hoặc 12 giờ, tùy mức nào đến trước; quota/chính sách API vẫn áp dụng. Xem [giới hạn YouTube](https://support.google.com/youtube/answer/71673) và [giao thức resumable](https://developers.google.com/youtube/data/guides/using_resumable_upload_protocol).
+5. Trước **Giải phóng dung lượng**, hộp xác nhận hiển thị riêng biên nhận YouTube Private và Drive có khớp dữ liệu hiện tại không. Hồ sơ nhẹ không thay bản MP4; biên nhận chỉ phản ánh lần tải đã xác nhận, chưa kiểm tra lại từ xa. Cần tự mở Studio/Drive kiểm tra nếu muốn chắc chắn bản từ xa còn dùng được. Tải cloud lỗi không thay trạng thái QA/VERIFIED của dự án.
+
+### Trợ lý Telegram hai chiều
+
+Mở **Hướng dẫn sử dụng** trên thanh bên để xem 4 thẻ thao tác nhanh: gửi link qua Telegram, duyệt từ xa/xem Demo, Kho cloud và bảo vệ ổ dữ liệu. Hướng dẫn giữ nguyên trong giao diện cá nhân; Telegram và Kho cloud cần Internet, trợ lý chỉ nhận lệnh khi ứng dụng trên máy tính đang mở và không ở chế độ Offline.
+
+1. Trong **Kho cloud → Trợ lý Telegram**, nhập bot token và chat ID dạng số của chat được phép điều khiển, bật Telegram và nhận lệnh hai chiều, rồi **Lưu cấu hình** và **Gửi tin nhắn test**. Để trống hai trường bí mật khi lưu lần sau để giữ giá trị cũ. Cấu hình được mã hóa bằng DPAPI tại `storage/private/telegram_config.json`; API không trả lại token/chat ID. Không gửi token trong hội thoại hoặc chia sẻ tệp cấu hình. Trong server mode chỉ quản trị viên được cấu hình/xem trạng thái này; bot là bộ điều khiển cục bộ được quản trị viên tin cậy, không phải tài khoản nhiều người.
+2. Kết nối Drive và YouTube bằng OAuth Desktop. Tài khoản yêu cầu là **nhocnam2111@gmail.com**. Drive đối chiếu email OAuth; OAuth YouTube hiện chỉ cấp quyền upload và không trả email. Mở YouTube Studio kiểm tra tài khoản rồi đánh dấu xác nhận trong Kho cloud. Xác nhận này gắn với `connection_id` hiện tại, phải làm lại sau khi kết nối YouTube mới. Không coi một địa chỉ email ghi trên giao diện là bằng chứng đã đăng nhập tài khoản đó. OAuth Desktop JSON nhập trong Kho cloud là cấu hình chung cho Drive và YouTube; đổi client sẽ yêu cầu kết nối/xác nhận YouTube lại, không dùng token từ project cũ.
+3. Gửi link Bilibili (`bilibili.com/video/…`, `b23.tv/…`) hoặc Douyin (`douyin.com/…`, `iesdouyin.com/…`). Bot kiểm tra ổ dữ liệu trước, tạo dự án qua luồng chuẩn rồi xếp hàng Auto: `screen_dub`, `piper:ngochuyen`, `+15%`, `mix`, `skip_uncertain=true`. Khi còn dưới 35 GiB, chọn `compact`; nếu còn dưới ngưỡng an toàn sau khi kiểm tra/dọn, không tạo dự án. Trả mã dự án và nút hủy; tác vụ vẫn chịu các gate nguồn, timing và QA như Studio.
+4. `/help`, `/status`, `/list`, “trạng thái ổ D”, “danh sách”, “demo”, “đẩy youtube”, “dọn ổ D”, “hủy” dùng xử lý lệnh cục bộ, không phụ thuộc Gemini. Có nhiều tác vụ thì chọn nút hủy đúng dự án. Demo/upload mặc định chọn dự án VERIFIED còn MP4 cục bộ cập nhật gần nhất trong toàn bộ DB hoặc nhận mã `proj_…` cụ thể; không bị giới hạn bởi danh sách 5 dự án gần đây. Hỏi hội thoại khác dùng Gemini qua key pool, một request với ngân sách 10 giây, lỗi thì trả trạng thái thực. AI chỉ giải thích và đưa nút thao tác, không tự phê duyệt/xóa/upload. Dung lượng từng dự án được đo nền và có thể hiển thị “đang đo”; không quét toàn bộ media trên đường xử lý `/status`.
+5. Khi dừng cần duyệt, Telegram phân loại theo **mã lỗi**: OCR có nút tiếp tục theo chính sách bỏ qua/xử lý câu chưa chắc hoặc duyệt nguồn; timing/QA có nút thử Auto và xem MP4 hiện có. “Bỏ qua” dùng lại cơ chế Auto hiện tại, không ép duyệt cue thiếu bằng chứng và không nới QA. Nút duyệt gắn với generation của lượt Auto; nút hủy gắn với task_id thực tế, kể cả tác vụ cloud chưa có hồ sơ Auto. Không dùng nút cũ cho lượt/tác vụ mới. Sau VERIFIED, tự lưu hồ sơ nhẹ nếu Drive đã kết nối đúng tài khoản, rồi gửi các nút Demo, YouTube Private, Drive nhẹ và yêu cầu xóa. Video từ 15 phút có nhắc xem Demo nổi bật. Hồ sơ nhẹ không chứa MP4.
+6. Demo là bản trích tối đa 120 giây từ MP4 hiện có, ưu tiên đoạn dày cue theo transcript DB (kể cả transcript rỗng có chủ ý). Không có DB mới dùng timeline. Mã hóa riêng bằng H.264/AAC, chiều rộng tối đa 1280, kiểm tra tệp thực **nhỏ hơn 35 MiB** trước khi `sendVideo`; luôn xóa tệp demo tạm sau gửi hoặc lỗi. Bản demo không thay thế kiểm tra video đầy đủ và không sửa MP4 gốc.
+7. Xóa thủ công có hai bước: yêu cầu hiển thị dung lượng, tình trạng biên nhận và phạm vi **media nguồn + WAV + MP4**; sau đó xác nhận đúng tin nhắn trong 10 phút. Xác nhận chỉ dùng một lần và khớp danh tính media đã hiển thị. Hủy hoặc media thay đổi thì không xóa. SRT, JSON, kịch bản và SQLite được giữ. Không thao tác trên dự án đang chạy hoặc thư mục liên kết ra ngoài.
+
+**Auto Disk Guard:** mặc định bật, ngưỡng 8 GiB trên ổ thực sự chứa `settings.storage_path` (thường là D:). Kiểm tra trước khi tiếp nhận link Telegram, chọn dự án cũ nhất trước: DB `VERIFIED`, không có tác vụ hoạt động, media trên 100 MiB và có biên nhận khớp dữ liệu/tài khoản của **YouTube Private hoặc Drive full_delivery**. Gói `metadata_only` không đủ điều kiện tự xóa video. Dừng dọn khi đủ ngưỡng, báo dự án và số byte thực thu hồi. Biên nhận khớp lần tải trước chưa chứng minh bản từ xa vẫn còn; kiểm tra cloud nếu bạn đã xóa/sửa tệp từ xa. Lệnh “dọn ổ D” vẫn hỏi xác nhận, không tự biến thành thao tác xóa. Câu hỏi như “hủy tác vụ là gì?” hoặc “đẩy YouTube là gì?” được xử lý như hỏi đáp, không tự hủy hoặc upload.
+
+**Vòng đời:** bot chỉ nhận đúng chat ID đã cấu hình; một tiến trình giữ khóa polling dù mở nhiều Studio. Khi đóng ứng dụng bình thường, bot ngừng polling và thử gửi thông báo nghỉ trong timeout 2 giây; mất điện/kill tiến trình không bảo đảm gửi được tin cuối. `last_update_id` được lưu nguyên tử trong `storage/private/telegram_offset.json` **trước khi thực thi lệnh** để không phát lại khi mở máy. Lần cài bot mới bỏ backlog cũ. Lệnh đang chờ thực thi khi máy tắt có thể chưa chạy; kiểm tra trạng thái rồi gửi lại chủ động. Offset hỏng hoặc không ghi được thì dừng nhận lệnh, không đoán để chạy lại. Đừng xóa offset để thử lại lệnh xóa/upload.
+
+### Studio từ xa qua menu Telegram
+
+Bot đăng ký nút Menu và các lệnh `/menu`, `/new`, `/projects`, `/running`, `/review`, `/storage`, `/status`, `/help` cho đúng chat đã cấu hình. Máy tính và Studio phải đang mở, có mạng; chưa có dịch vụ điều phối nhận việc khi máy tắt. Không cần mở cổng Studio ra Internet.
+
+- **Tạo có cấu hình:** Menu → Tạo dự án → gửi một link Bilibili/Douyin → tải và kiểm định nguồn → chọn cấu hình → Kiểm tra & chạy Auto → xác nhận. Tải nguồn không tự khởi chạy dịch/giọng/render trong luồng này. Có thể đóng chat rồi vào Dự án để tiếp tục. Dán link ngoài trình tạo vẫn dùng luồng Auto nhanh hiện hữu; link đã tạo bằng trình này được hỏi mở bản cũ hay tạo bản mới khi gửi lại đúng URL.
+- **Cấu hình Auto:** ba thành phẩm (giọng + phụ đề, chỉ phụ đề giữ tiếng gốc, chỉ giọng giữ hình gốc), đọc chữ/nghe thoại, sáu mẫu phụ đề như Web, chín lựa chọn giọng, tốc độ 1.0/1.1/1.15/1.2/1.25x, bốn profile fast/balanced/compact/quality và quy tắc xử lý câu chưa chắc. Chỉ phụ đề luôn giữ tiếng gốc và không tạo giọng; chỉ giọng không cho chọn tắt giọng, giữ hình gốc bằng style original. Menu hiển thị lựa chọn giọng, không bảo đảm model đã được cài hoặc nhà cung cấp luôn sẵn sàng. Bản nháp cấu hình lưu riêng; chỉ khi xác nhận chạy mới gửi RunAllRequest chuẩn và lưu auto_workflow.json. Tiếp tục Auto dùng cấu hình đã lưu, khác với mở bảng cấu hình mới.
+- **Điều hành:** danh sách phân trang, Đang xử lý, Cần duyệt/lỗi, Kho lưu trữ và thẻ từng dự án. Các tác vụ dùng chung hàng đợi của Web. Thẻ đang chạy được cập nhật nền khoảng 30 giây khi có thay đổi, tối đa bốn thẻ mỗi lượt; có nút Cập nhật thủ công. Yêu cầu dừng không có nghĩa đã dừng. Thông báo tải/Auto kết thúc không thay đổi kết quả nếu gửi Telegram thất bại.
+- **Duyệt/sửa:** xem từng câu nguồn–Việt, xem khung hình giữa câu, nghe file giọng đã có, sửa nguồn hoặc lời Việt bằng tin nhắn rồi xác nhận Lưu. Gửi `/cancel` hoặc về Menu để thoát nhập và hủy xác nhận sửa. API Studio ghi SQLite và vô hiệu hóa phần dịch/giọng/video phụ thuộc như trên Web. Nếu Web đã sửa hoặc dự án chạy lượt mới, nút cũ bị từ chối. Duyệt/tiếp tục Auto có bước xác nhận; không bỏ qua cổng nguồn, timing hay QA.
+- **Sau hoàn tất:** Demo, YouTube Private, hồ sơ nhẹ Drive và giải phóng media dùng lại chức năng hiện hữu. Có nút mở liên kết cloud đã lưu và lựa chọn tải MP4 đầy đủ lên Drive với xác nhận dung lượng riêng. Biên nhận là lịch sử lưu, không phải xác nhận vừa kiểm tra lại cloud. VERIFIED là QA kỹ thuật, vẫn cần người dùng xem/nghe nội dung.
+- **Dự án lỗi:** mở thẻ để xem mã lỗi, thử tải nguồn lại khi chưa có media, cấu hình/chạy tiếp hoặc chọn Xóa cả dự án. Xóa cả dự án là hai bước, chỉ khi rảnh, mất cả nguồn/giọng/MP4/phụ đề/hồ sơ và bản ghi dự án trên máy; bản cloud giữ nguyên. Giải phóng media là thao tác khác, giữ phụ đề/hồ sơ. Không tự xóa dự án chỉ vì tác vụ thất bại. Nút xác nhận bị ràng buộc với tin nhắn, tài khoản, phiên bản dự án và hạn dùng; dùng một lần. Hủy xóa vô hiệu hóa nút xác nhận cũ.
+
+### Kiểm tra trước chạy và vận hành video dài
+
+- Khi chọn rõ OCR hoặc nghe thoại, Auto kiểm tra loại nguồn của câu đã lưu **trước khi duyệt/dịch/tạo giọng**. Nếu không khớp, giữ nguyên dữ liệu và dừng. Trên Telegram: Cấu hình Auto → chọn Nguồn để dịch → **Nhận dạng lại nguồn** → đọc cảnh báo và xác nhận. Nhận dạng lại có thể thay thế câu và bản sửa cũ; sau đó mở cấu hình chạy Auto. Chọn `auto` vẫn cho phép bộ nhận dạng tự quyết định.
+- Thẻ dự án, xác nhận tiếp tục và thông báo VERIFIED hiển thị cảnh báo dịch dự phòng/AI sửa nguồn nếu pipeline ghi nhận. `TRANSLATION_REVIEWED` trong Auto là phê duyệt theo quy tắc phần mềm; không phải bằng chứng người dùng đã xem. Cần đối chiếu nguồn–Việt và nghe Demo trước khi phát hành.
+- Bảng cấu hình Telegram hiển thị **dự toán chạy lại đầy đủ**. Auto kiểm tra chỗ trống trước OCR, trước tạo giọng và trước render theo các phần còn cần làm; không chặn lượt chỉ kiểm tra lại QA bằng dự toán render mới. Dự toán gồm proxy/ảnh/âm thanh đối chiếu, các thế hệ WAV, hai thế hệ render và khoảng trống dự phòng. Đây là mô hình bảo thủ dựa trên thời lượng/dung lượng nguồn, không phải đo kích thước MP4 cuối hoặc cam kết đủ đĩa cho mọi nội dung. `compact` tiết kiệm phần render, không làm nhỏ nguồn đã tải và không giảm QA.
+- Khi `PERSONAL_MODE=true` và Auto Disk Guard bật, kiểm tra tài nguyên trong lúc chạy cũng áp dụng ngưỡng trống của Disk Guard (mặc định 8 GiB). Thiếu chỗ thì tác vụ chuyển gián đoạn và giữ checkpoint; không tự xóa dự án đang chạy. Giải phóng media đã sao lưu rồi tiếp tục.
+- `PIPELINE_SERIALIZE_HEAVY_TASKS=true` mặc định xếp lần lượt OCR, giọng, render, Auto và đối chiếu audio trên cùng hàng đợi. Server luôn giới hạn như trước. Tải/upload không lấy khóa tác vụ nặng nhưng vẫn phụ thuộc worker còn rảnh; không cam kết vượt hàng đợi. Có thể tắt cờ này trên máy đủ tài nguyên sau khi đo thực tế, không tăng số job chỉ để tăng phần trăm tiến độ.
+- Downloader Range chỉ giữ tối đa bốn future đang xử lý mỗi luồng, không tạo trước toàn bộ future của tệp dài. Khi ghi nhận retry, giảm số đoạn mới được cấp; tăng dần sau các đoạn thành công. Request đang chạy được hoàn tất an toàn. Vẫn kiểm tra Content-Range/byte/hash và manifest trước khi dùng lại. Không khẳng định tăng băng thông thực tế khi chưa đo ngoài pytest.
+- Tiến độ Telegram có thời gian đã xử lý và ghi rõ phần trăm là mốc công việc, **không phải ETA**. Tải nhanh không đồng nghĩa OCR/giọng/render nhanh; video ngắn nhiều lời có thể cần phục hồi timing lâu hơn video dài ít lời.
+
+Mặc định: `TELEGRAM_NOTIFY_ENABLED=false`, token/chat ID rỗng; `TELEGRAM_POLLING_ENABLED=true`, `TELEGRAM_POLL_INTERVAL_SECONDS=2.5` (0,5–30), `TELEGRAM_DEMO_TRIGGER_DURATION_SECONDS=900` (tối thiểu 60), `AUTO_DISK_GUARD_ENABLED=true`, `AUTO_DISK_GUARD_MIN_FREE_GB=8` (2–100). Thông báo thường chia tối đa 3.800 ký tự; SRT/JSON trong dự án phải nhỏ hơn 45 MiB. Demo gửi multipart theo luồng, kèm thời lượng/kích thước khung hình đo từ tệp đã encode; timeout kết nối tối đa 10 giây, đọc/ghi tối đa 180 giây; polling có timeout riêng để dừng được. Lỗi thông báo không làm hỏng kết quả render/QA. Tác vụ giữ mã lỗi Telegram an toàn cùng trạng thái HTTP/thời gian chờ rate-limit; không lưu token, chat ID hay URL. Không tự gửi lại file khi kết quả truyền chưa rõ để tránh gửi trùng. API: `GET /api/notifications/telegram/status`, `POST /api/notifications/telegram/config`, `POST /api/notifications/telegram/test`. Trạng thái/bảng kho Web và Telegram cùng đọc DB, hàng đợi và biên nhận cục bộ, không phải một danh sách dự án riêng.
+
+---
+
+## Hướng dẫn CLI & Bộ công cụ Benchmark / Chẩn đoán
+
+### 1. Lệnh dòng lệnh chính (`main.py`)
+
+Hỗ trợ tự động hóa và thao tác trực tiếp qua console:
 
 ```powershell
-python scripts/run_small_server.py --status
+# Tạo dự án mới từ liên kết hoặc tệp video
+python main.py add "https://www.douyin.com/video/..." --trim-start 00:00:10 --trim-end 00:02:30
+
+# Tải và kiểm định video nguồn
+python main.py download MA_DU_AN
+
+# Lưu tọa độ vùng phụ đề (tọa độ chuẩn hóa 0..1)
+python main.py roi MA_DU_AN --x 0.05 --y 0.85 --width 0.90 --height 0.12
+
+# Bóc tách phụ đề hardsub
+python main.py ocr MA_DU_AN
+
+# Phê duyệt các câu tiếng Trung sau khi đã kiểm tra và sửa hết nghi vấn
+python main.py approve-source MA_DU_AN
+
+# Dịch sang tiếng Việt
+python main.py translate MA_DU_AN
+
+# Phê duyệt bản dịch
+python main.py approve-translation MA_DU_AN
+
+# Tạo giọng đọc và căn timeline
+python main.py voiceover MA_DU_AN --voice piper:ngochuyen --rate +15%
+
+# Render video thành phẩm
+python main.py render MA_DU_AN --style cover
+
+# Chạy kiểm định chất lượng kỹ thuật QA
+python main.py verify MA_DU_AN
+
+# Chạy tự động trọn gói từ đầu đến cuối
+python main.py run-all MA_DU_AN --voice piper:ngochuyen --rate +15% --audio-mode mix
+
+# Xem trạng thái dự án
+python main.py status MA_DU_AN
+
+# Mở máy chủ Studio
+python main.py serve --host 127.0.0.1 --port 9000
 ```
 
-`ready` nghĩa tiến trình đúng workspace và API đang trả lời; chưa chứng minh mạng máy khách, provider hay toàn bộ video đã đạt chất lượng.
-
-#### Quy trình vận hành và điều kiện qua từng bước
-
-| Giai đoạn | Kiểm tra bắt buộc | Nếu chưa đạt |
-|---|---|---|
-| Trước khi mở | Đĩa còn đủ cho video, tệp trung gian và sao lưu; không chạy backend cũ song song; mạng đáng tin cậy | Dừng thao tác mới, xử lý dung lượng/cấu hình; không xóa nguồn dự án |
-| Khởi động | Mở BAT, chạy `--status`, kiểm tra `ready` và backend PID; đọc log nếu không đạt | Không bấm liên tục hoặc xóa khóa; phân biệt server chưa sẵn sàng với cổng do ứng dụng khác giữ |
-| Đăng nhập | Tài khoản riêng từng người; xem API/media phải yêu cầu đăng nhập; operator/viewer đúng quyền | Dừng mở LAN nếu có dữ liệu truy cập được khi chưa đăng nhập |
-| Kết nối máy khách | Mở IP LAN do launcher in, đăng nhập, phát video và nghe âm thanh trên máy khách thật | Kiểm tra IP/DHCP, profile Private và firewall; không mở router ra Internet để sửa lỗi LAN |
-| Nhập nguồn | Dùng link hoặc upload; kiểm định tệp thật, thời lượng, hình/âm thanh trước OCR | Sửa nguồn/download; đọc được tiêu đề chưa phải tải thành công |
-| Xử lý và duyệt | Một phiên giữ quyền sửa; công đoạn nặng chờ slot; kiểm tra cue/crop, dịch, giọng nghe thử, render và QA | Hủy đúng tác vụ, chờ worker dừng rồi chạy lại phần ảnh hưởng; không hạ ngưỡng QA |
-| Dừng/bảo trì | Chờ xong hoặc hủy và xác nhận terminal; có bản sao toàn vẹn trước thay đổi dữ liệu | Không ép tắt chỉ vì tiến độ đứng; đọc log/trạng thái công đoạn trước |
-| Sao lưu/phục hồi | Xem bản sao đã hoàn tất, checksum/SQLite đạt; phục hồi thử sang thư mục mới | Thư mục không có manifest hoàn tất là bản dở, không dùng để phục hồi |
-| Sau sự cố | Kiểm tra server, task INTERRUPTED, cache đúng identity rồi chạy tiếp; kiểm tra lại đầu ra | Không coi nhãn hoàn tất hoặc file tồn tại là video đã đạt |
-
-Sao lưu lỗi được chờ tăng dần 5–60 phút trước khi thử lại, tránh liên tục chặn ứng dụng. Trong lúc sao lưu vẫn cho phép đăng xuất/thu hồi phiên. Không sao chép hồ sơ Chromium đang hoạt động: cache thay đổi/khóa/đường dẫn dài không tạo được snapshot nhất quán. Sau phục hồi có thể cần đăng nhập Douyin lại. Các thư mục bản sao dở từ phiên bản cũ không được tính là backup hợp lệ; không tự xóa khi chưa đối chiếu. Server chạy lâu dài đã tắt giới hạn Scheduled Task 72 giờ và không bị Task Scheduler dừng chỉ vì chuyển sang pin; mất điện/cạn pin vẫn dừng máy. Script nền chờ launcher và trả mã thoát để Task Scheduler theo dõi được.
-
-Việc sao lưu gồm chép và đọc lại toàn bộ tệp để kiểm tra checksum, không chỉ lưu database. Bộ dữ liệu khoảng 4 GB với hơn 27.000 tệp có thể cần nhiều phút trên máy này. Chỉ chạy lúc rảnh; không dừng server chỉ vì chưa có manifest. Chỉ xem là đã đạt khi API trả `verified: true` và bản sao xuất hiện trong danh sách hoàn tất.
-
-Chế độ cũ vẫn chạy bằng `start_server.bat`. Chế độ quản lý nhiều máy dùng **`start_small_server.bat`**; cần dừng instance cũ trước để tránh hai backend dùng chung dữ liệu. Launcher mới không giết tiến trình chiếm cổng. Dữ liệu video/model/giọng vẫn nằm trên server; máy khách dùng trình duyệt cùng mạng riêng. Đây là **một workspace chung**, chưa chia kho video riêng theo khách hàng.
-
-1. Chạy `python scripts/prepare_small_server.py` trên máy chủ. Nếu chưa có admin, công cụ tạo tài khoản và lưu mật khẩu ngẫu nhiên vào tệp riêng trong `storage/private/server_login_*.txt`, giới hạn quyền đọc theo tài khoản hệ điều hành. Không in mật khẩu vào log/chat. Nếu đã có admin thì giữ nguyên, không tự đặt lại mật khẩu.
-2. Khi hết tác vụ, dừng máy chủ cũ, mở `start_small_server.bat`. Mở địa chỉ được in trong cửa sổ và đăng nhập bằng tệp riêng trên. Nếu chưa chuẩn bị admin, launcher chỉ mở localhost để tạo admin đầu tiên; sau đó cần mở lại launcher để dùng LAN.
-3. Máy khách mở địa chỉ LAN của server, ví dụ `http://192.168.1.20:8088/`. Đặt DHCP reservation trong router để giữ địa chỉ ổn định. Chỉ cho phép qua Windows Firewall trên mạng Private/LocalSubnet; không forward cổng ra Internet. Nếu chưa cấu hình firewall, cài bằng lệnh bên dưới trong PowerShell quản trị.
-4. Bấm **Quản lý máy chủ** ở thanh bên để tạo tài khoản cho máy/người thứ hai. Nên dùng hai tài khoản riêng thay vì chia sẻ mật khẩu admin. Tác vụ không phụ thuộc việc tab trình duyệt có mở hay không; nhưng máy chủ tắt/mất điện thì xử lý vẫn dừng.
-
-| Quyền | Công việc |
-| --- | --- |
-| `admin` | Quản lý tài khoản, phiên truy cập, quyền sửa, khóa API, kết nối Drive, sao lưu, xóa dự án và xử lý video. |
-| `operator` | Xem workspace, tải video lên, tạo/chỉnh/xử lý dự án, hủy tác vụ của mình; không quản lý khóa hay tài khoản. |
-| `viewer` | Xem video, kết quả và tiến độ; không ghi nội dung dự án. |
-
-Trang quản lý hiển thị phiên/IP truy cập gần đây, người đang giữ quyền sửa, người gửi tác vụ, tiến độ, RAM/đĩa trống và nhật ký thao tác. Admin có thể đăng xuất phiên khác và giải phóng quyền sửa bị treo. Quyền sửa thuộc một tab, tự hết hạn sau 60 giây không gia hạn; các phiên khác vẫn đọc được. Khi bị xung đột phiên bản, ứng dụng từ chối ghi và yêu cầu tải lại, không tự ghi đè bản mới. Chỉ một công đoạn nặng OCR/TTS/render dùng tài nguyên tại một thời điểm; tác vụ chờ có thể hủy.
-
-**Nhập video từ máy khách:** dùng nút **Tải video từ máy này lên server** ở trang Dự án mới, giới hạn mặc định 500 MB, chỉnh bằng `MAX_UPLOAD_SIZE_BYTES`. Giữ trang mở khi đang upload. Server kiểm tra video và checksum trước khi tạo dự án; upload lỗi/dở được dọn. Đây là upload lại từ đầu nếu mất mạng, chưa có giao thức upload chia phần tiếp tục. Đường dẫn `C:\...` trên máy khách không phải đường dẫn trên server; chỉ admin có thể nhập file từ thư mục server được cho phép.
-
-**Sau restart:** task và progress được lưu trong SQLite; tác vụ dở được đánh dấu `INTERRUPTED`, không treo mãi ở RUNNING và không tự giả định hoàn tất. Mở dự án, chạy tiếp công đoạn; chỉ cache/manifest hoàn tất đúng identity được dùng lại. Không tự gửi lại mọi job, vì một số công đoạn có thể gọi dịch vụ tính phí hoặc cần duyệt. Giọng/tốc độ/màu giọng được lưu trên server theo tài khoản/dự án trong chế độ này; đổi máy vẫn giữ lựa chọn sau đăng nhập.
-
-**Sao lưu:** khi rảnh, server thử tạo bản sao đã kiểm tra sau mỗi 24 giờ (`SERVER_AUTO_BACKUP_HOURS=0` để tắt). Admin có thể bấm sao lưu/kiểm tra/xóa bản cũ trong trang quản lý; không được xóa bản sao hợp lệ cuối cùng. Tác vụ hoặc thao tác ghi đang chạy thì hoãn sao lưu. Trong lúc sao lưu, vẫn xem được dữ liệu nhưng không ghi mới. Bản sao gồm SQLite nhất quán, project, giọng, uploads, cache, từ điển và dữ liệu cấu hình/đăng nhập cần giữ; không sao chép lại model hay audit cũ. Bản sao chứa dữ liệu riêng và có thể chứa khóa cấu hình, không chia sẻ thư mục `backups` qua web hay đưa lên Git. Chưa tự đưa backup ra máy/ổ khác: bản sao trên cùng ổ không bảo vệ khi ổ đó hỏng. Kiểm tra đĩa trống và chuyển bản sao cần giữ sang ổ khác theo quy trình của bạn.
-
-Phục hồi offline sang **thư mục chưa tồn tại**, giữ nguyên dữ liệu đang dùng:
-
-```powershell
-python scripts/server_backup.py verify "storage/backups/<ten-ban-sao>"
-python scripts/server_backup.py restore "storage/backups/<ten-ban-sao>" --destination "D:/DuanLayLink-Restored"
-```
-
-Công cụ kiểm tra checksum/SQLite trước khi chép, điều chỉnh đường dẫn dữ liệu và bỏ phiên đăng nhập/quyền sửa cũ. Cấu hình kết nối thư mục phục hồi nằm trong `restore.env`; đối chiếu rồi áp dụng khi server đã dừng. Môi trường/model/công cụ vẫn cần cài; khóa mã hóa DPAPI và đăng nhập nguồn có thể cần làm lại khi đổi tài khoản Windows. Không coi restore là đã nghiệm thu video: vẫn kiểm tra file và QA khi mở dự án.
-
-**Tự khởi động khi đăng nhập Windows:** chạy PowerShell dưới đúng tài khoản Windows dùng model/DPAPI:
-
-```powershell
-powershell -NoProfile -File scripts/install_server_startup.ps1
-# Chạy PowerShell quản trị nếu cần tạo quy tắc firewall cho Python/cổng 8088:
-powershell -NoProfile -File scripts/install_server_startup.ps1 -ConfigureFirewall
-# Gỡ tự khởi động, không xóa dự án hoặc dừng tiến trình đang chạy:
-powershell -NoProfile -File scripts/install_server_startup.ps1 -Remove
-```
-
-Supervisor chạy một instance, khởi động lại sau lỗi, ghi log tại `storage/maintenance/small_server.log`. Khởi động cùng lúc nhiều launcher hoặc cổng bận sẽ báo lỗi thay vì kết thúc server khác. Tác vụ tự chạy **sau khi người dùng đăng nhập Windows**, không phải trước màn hình đăng nhập. Launcher yêu cầu Windows không sleep trong lúc phục vụ và khôi phục yêu cầu đó khi dừng; có thể dùng `--allow-sleep` nếu muốn để Windows tự ngủ. Không tắt được hậu quả mất điện; máy chủ phải luôn bật để các máy khác làm việc. Không bật autoreload ở chế độ server.
-
-Đăng nhập/kết nối OAuth Drive thực hiện trên trình duyệt máy chủ do callback Desktop OAuth dùng loopback. Máy khách đã đăng nhập ứng dụng vẫn có thể gửi thành phẩm lên Drive đã kết nối. Tài khoản/hạ tầng hiện là nhóm tin cậy trong LAN; cần HTTPS/VPN và rà soát triển khai trước khi dùng qua Internet. Không bật CORS tùy ý hay bỏ xác thực để làm cho video phát được.
-
-Nếu quên mật khẩu admin, chủ máy có thể chạy `python scripts/prepare_small_server.py --reset-admin <ten-tai-khoan>` trên máy chủ; mật khẩu mới cũng chỉ nằm trong tệp riêng, các phiên cũ bị thu hồi. Không gửi nội dung tệp mật khẩu vào chat.
-
-## 3. Quy trình từ video nguồn đến thành phẩm
-
-Luồng sử dụng:
-
-**Nhập video → tải/đọc nguồn → chọn vùng chữ → nhận dạng → duyệt nguồn → dịch và duyệt → chọn phụ đề → tạo giọng → xuất video → kiểm tra và tải về.**
-
-Các bước trên giao diện được đánh số từ 1 đến 9. Bước nhận dạng và dịch có phần duyệt riêng.
-
-Một vài từ trên giao diện: **ROI** là khung chọn vùng chữ; **OCR** là đọc chữ trên hình; **STT** là nghe để lấy lời thoại; **TTS** là tạo giọng từ văn bản; **render** là ghép và xuất video; **QA** là kiểm tra đầu ra. **Model** là bộ dữ liệu AI, còn **runtime** là công cụ chạy model đó.
-
-| Bước | Bạn làm gì? | Hệ thống tạo ra gì? |
-| --- | --- | --- |
-| 1. Tạo dự án | Nhập URL hoặc đường dẫn video trên máy; chọn đoạn cắt nếu cần. | Một dự án riêng để quản lý video và tiến độ. |
-| 2. Tải/nhập video | Bấm tải/nhập và đợi kiểm tra nguồn. | Video nguồn dùng cho các bước sau. Tạo dự án chưa đồng nghĩa đã tải xong. |
-| 3. Chọn vùng chữ | Kéo khung bao quanh phụ đề Trung trên video. | Vị trí vùng cần đọc và che chữ. Nên xem vài thời điểm khác nhau. |
-| 4. Nhận dạng | Chọn cách lấy lời thoại, chạy thử nếu cần, sửa và duyệt các câu nguồn. | Danh sách câu kèm thời gian bắt đầu/kết thúc. |
-| 5. Dịch Việt | Chọn dịch vụ, chạy dịch, đọc lại và sửa, sau đó duyệt bản dịch. | Bản dịch gắn đúng với từng câu nguồn. |
-| 6. Che chữ và đặt sub | Chọn mẫu chữ, điều chỉnh nền che, xem thử rồi lưu. | Cấu hình phụ đề dùng cho cả xem thử và video xuất. |
-| 7. Tạo giọng Việt | Chọn giọng, nghe thử, chọn tốc độ/màu giọng rồi tạo. | Âm thanh từng câu và bản giọng ghép theo thời gian video. |
-| 8. Xuất video | Chọn chế độ âm thanh và chất lượng, bấm render. | Video có phụ đề và âm thanh theo cấu hình đã lưu. |
-| 9. Kiểm tra và tải | Xem báo cáo kỹ thuật, nghe/xem kết quả, tải video. | Thành phẩm và các file phụ đề/báo cáo được giao diện cung cấp. |
-
-Lần đầu nên thử một đoạn ngắn trước khi chạy video dài. Sau khi đã quen và có cấu hình phù hợp, bạn có thể dùng chức năng chạy các bước còn lại. Chạy tự động không thay thế việc kiểm tra nội dung.
-
-### Chọn cách nhận dạng ở bước 4
-
-- **Video có phụ đề Trung trên hình:** chọn nhận dạng chữ, thường được gọi là Hardsub/OCR. Khung chọn chữ ở bước 3 cần đúng vị trí.
-- **Video không có phụ đề:** chọn nghe lời thoại, thường được gọi là STT/Whisper. Không cần vẽ khung chữ để nghe lời thoại.
-- **Tự động:** hệ thống kiểm tra một đoạn mẫu rồi chọn cách xử lý. Nếu mẫu rơi vào đoạn mở đầu không có thoại/chữ, bạn nên chọn lại cách phù hợp.
-
-Chữ cách điệu, nền quá sáng, phụ đề chạy vị trí hoặc tiếng nói khó nghe đều có thể làm nhận dạng sai. Hãy sửa câu nguồn trước khi dịch, nhất là tên riêng, số và câu phủ định.
-
-### Đọc và sửa danh sách câu
-
-Nếu đã bóc phụ đề xong rồi bấm chạy lại, hủy lần chạy mới sẽ giữ bộ câu và ảnh đối chiếu đã hoàn tất trước đó. Khi tác vụ đã dừng, bạn có thể tiếp tục kiểm tra/phê duyệt bộ câu cũ; các câu mơ hồ vẫn phải được xử lý trước khi duyệt. Nếu đã đổi nguồn, đoạn cắt hoặc ROI làm kết quả cũ hết hiệu lực, vẫn cần một lượt bóc mới hoàn tất. Hủy lần bóc đầu tiên không tạo ra kết quả để duyệt. Nút hủy gửi yêu cầu dừng; ứng dụng chỉ mở thao tác sau khi worker đã dừng thực sự.
-
-Mỗi hàng là một câu hoặc đoạn thoại ngắn. Trong tài liệu kỹ thuật, hàng này được gọi là **cue**. Bạn có thể xem thời gian, phát đoạn tương ứng và sửa nội dung; giao diện còn có các thao tác tách/gộp hoặc xử lý câu được chọn tùy trạng thái dự án.
-
-Khi sửa bản dịch, kiểm tra câu đó với đoạn video, không chỉ đọc riêng tiếng Việt. Nếu câu quá dài để đọc trong thời gian ngắn, cần rút gọn mà vẫn giữ nghĩa. Hệ thống có hỗ trợ đề xuất sửa timing; đề xuất AI vẫn cần duyệt khi có điểm chưa chắc chắn.
-
-Trong tab **RapidOCR Cues**, bấm **Cần kiểm tra (số câu)** để gom các câu đang chặn phê duyệt từ toàn bộ video, không phải tìm từng trang. Bấm ảnh phụ đề để phóng lớn, sửa chữ nếu cần rồi bấm **Đã kiểm tra chữ**. Lưu thành công thì câu tự rời danh sách cần kiểm tra; nút **Đã xác nhận** cho xem lại những câu đã đối chiếu. Khi còn câu bị đánh dấu, nút **Phê duyệt OCR** tự mở danh sách cần kiểm tra. Các câu tin cậy thấp hoặc có phương án OCR khác vẫn phải được đối chiếu trước khi duyệt.
-
-Nếu một dòng là tên video, bản quyền, watermark, dòng trống hoặc nội dung không cần đưa vào lời thoại, bấm **🗑 Xóa câu** rồi xác nhận để loại khỏi danh sách. Số câu cần kiểm tra sẽ cập nhật sau khi lưu thành công. Thao tác này loại dòng khỏi phụ đề/dịch/giọng đọc; chữ đã in trong hình video được xử lý riêng ở bước che chữ.
-
-## 4. Mẫu chữ và nền che theo ảnh đã chọn
-
-Xem khung hình dùng đúng thời gian đang dừng trên video. Nếu mốc đó nằm giữa hai câu thì có thể không thấy sub Việt hoặc hộp che; thông báo dưới ảnh giải thích và có nút chuyển đến câu có sub gần nhất. Ứng dụng không tự thêm chữ mẫu vào khung trống. Khi chưa dịch, cần tạo bản dịch trước để xem chữ Việt.
-
-Trong **Che chữ Trung & Dán sub Việt**, bấm **Áp dụng mẫu ảnh chuẩn**, bấm **Xem thử**, rồi **Lưu cấu hình**. Nạp mẫu chưa tự ghi đè cấu hình đã lưu của dự án.
-
-Mẫu hiện hành là **v2**: chữ trắng IN HOA, nét dày, hơi nghiêng phải, viền đen; dải nền mờ có phủ xám nhẹ và chạy ngang khung. Font Anton được kèm trong ứng dụng, không cần cài riêng. Mẫu được dựng theo đặc điểm ảnh bạn cung cấp, chưa xác định được đúng font gốc của ảnh.
-
-Bạn vẫn chỉnh được:
-
-- Font, cỡ chữ, màu chữ, màu và độ dày viền.
-- Độ rộng nét chữ, độ xiên, giới hạn chiều rộng dòng và ưu tiên một dòng.
-- Độ làm mờ nền, màu nền, độ đậm nền và phần đệm quanh vùng che.
-- Bật/tắt dải che ngang hết khung.
-
-**Vị trí và chiều cao dải che theo khung ROI** bạn vẽ trên video. Khi tắt chế độ ngang hết khung, chiều ngang cũng theo ROI. Chữ được căn giữa ROI; thanh cách đáy dùng cho bố cục song ngữ.
-
-Nếu dải quá cao, điều chỉnh ROI cho vừa vùng phụ đề; không thu nhỏ đến mức làm lộ chữ gốc. Nếu còn thấy nét chữ Trung, kiểm tra lại ROI rồi tăng blur hoặc độ đậm nền. Xem thử cả cảnh sáng và tối, cả câu ngắn lẫn câu dài.
-
-Ba kiểu xử lý:
-
-| Lựa chọn | Kết quả |
-| --- | --- |
-| Fast Cover | Dùng nền màu hoặc làm mờ + phủ màu để che chữ gốc, đặt sub Việt lên trên. |
-| Delogo | Nội suy vùng chữ từ ảnh xung quanh; có thể để lại vệt méo. Đây không phải AI phục hồi nền. |
-| Song ngữ | Giữ chữ Trung, đặt chữ Việt ở vị trí khác. |
-
-Chữ IN HOA chỉ thay đổi phần hiển thị, không sửa nội dung dịch lưu trong dự án hoặc ép giọng đọc đánh vần.
-
-## 5. Dịch và tạo giọng cần những gì?
-
-| Thành phần | Khi nào cần mạng/cài thêm? |
-| --- | --- |
-| Gemini để dịch | Cần mạng và API key hợp lệ. Quản lý trong mục Gemini API Keys. Có thể phát sinh phí hoặc bị giới hạn theo tài khoản. |
-| Edge để đọc Việt | Cần mạng và dịch vụ đang hoạt động. Có các giọng Việt để nghe thử và chọn. |
-| Dịch cục bộ HY-MT | Cần runtime/model đã cài và dịch vụ local được mở đúng cấu hình. Không tự coi là sẵn sàng khi chỉ có tên lựa chọn. |
-| Giọng cục bộ VieNeu | Cần thư viện tùy chọn, model và bộ giọng đã đăng ký; dùng RAM của máy. |
-| OCR và nghe lời thoại | Cần engine/model tương ứng. Lần thiết lập đầu có thể phải tải model. |
-| Xuất video | Cần FFmpeg/FFprobe. GPU hỗ trợ có thể tăng tốc encode; nếu không dùng được, hệ thống có thể chuyển CPU và báo cảnh báo. |
-
-Máy đã đăng ký giọng **Ngọc Huyền Review Phim** chỉ hiển thị giọng khi dữ liệu và runtime phù hợp. Không xóa `storage/voices` để dọn rác. Nếu hết RAM, dừng bớt tác vụ nặng rồi thử lại; có model trên ổ không có nghĩa máy luôn đủ RAM để chạy.
-
-Trong phần tạo giọng, các lựa chọn Mặc định, Review Phim, Đêm Khuya, Tin Tức/Drama và Khoa Học Bí Ẩn là cách xử lý màu âm của giọng đã chọn, không phải năm người đọc khác nhau. Nghe thử trước khi tạo cả video.
-
-**Từ điển cách đọc** cho phép nhập kiểu `từ = cách đọc`, mỗi dòng một mục. Từ điển áp dụng cho lời đọc, giữ nội dung phụ đề. Từ điển dùng chung được lưu tại `storage/tts/custom_dict.json` khi bạn đã lưu bằng giao diện.
-
-Mục **Sử dụng API** giúp xem các lượt Gemini dịch đã được ghi nhận, token và lỗi. Các số thống kê này không phải số quota còn lại hoặc hóa đơn chính thức của nhà cung cấp.
-
-## 6. Sửa lại có phải làm từ đầu không?
-
-Thông thường, chỉ cần chạy lại phần bị ảnh hưởng:
-
-| Thay đổi | Phần cần làm lại |
-| --- | --- |
-| Đổi video nguồn hoặc đoạn cắt | Nhập/tải nguồn và các bước xử lý phía sau. |
-| Đổi vùng nhận dạng chữ | Nhận dạng và kiểm tra lại các bước sau. |
-| Sửa câu nguồn | Dịch và tạo giọng cho phần bị ảnh hưởng, rồi xuất/kiểm tra lại. |
-| Sửa bản dịch | Giọng của câu bị sửa, video tổng và kiểm tra lại. |
-| Đổi giọng hoặc tốc độ | Tạo lại phần âm thanh liên quan, xuất/kiểm tra lại. |
-| Chỉ đổi font, nền che hoặc âm lượng trộn | Xuất và kiểm tra lại video; không cần tải lại nguồn chỉ vì đổi kiểu chữ. |
-
-Hệ thống giữ các kết quả dùng lại được. Phần lưu để khỏi làm lại được gọi là **cache**. Cache chỉ dùng khi nội dung và cấu hình còn phù hợp; không sửa tên file để ép hệ thống nhận lại dữ liệu cũ.
-
-Nếu đã có video xuất nhưng sửa bản dịch, video cũ không tự trở thành video mới. Cần chạy render và QA lại.
-
-## 7. Biết công việc đang chạy hay đã lỗi
-
-Giao diện có tiến độ, tên công đoạn, thời gian và thông báo lỗi. Một số công đoạn mạng hoặc model có thể chờ lâu; đừng bấm chạy nhiều lần liên tục.
-
-- **Đang chạy/chờ:** tiếp tục theo dõi. Không đóng cửa sổ máy chủ nếu muốn tác vụ tiếp tục.
-- **Bước 4 đang chuẩn bị video dò phụ đề:** hệ thống có thể tạo bản 960px của toàn bộ video trước khi dò chữ. Xem số giây đã chuẩn bị trong dòng trạng thái; sau đó mới chuyển sang số khung hình có chữ và số câu OCR. Không khởi động lại máy chủ khi tác vụ vẫn tiến triển.
-- **Hủy:** yêu cầu dừng có kiểm soát; kết quả đã hoàn thành có thể được giữ để chạy tiếp.
-- **Lỗi:** đọc thông báo, sửa nguyên nhân rồi chạy lại đúng bước. Không xóa dự án chỉ vì một dịch vụ tạm lỗi.
-- **Đã kiểm tra kỹ thuật:** các chỉ số đầu ra đã qua kiểm tra ở lần chạy đó. Bạn vẫn cần xem và nghe để duyệt nội dung.
-
-Hệ thống kiểm tra thời lượng, đủ câu dịch/giọng cần thiết, độ lệch lời đọc và luồng âm thanh/hình ảnh. Các ngưỡng timing gồm lệch trung bình không quá 0,3 giây và lệch lớn nhất không quá 1,5 giây; lệch thời lượng nguồn/đầu ra không quá 0,1 giây. Không nên bỏ qua cảnh báo chỉ vì đã có file MP4.
-
-Chưa có cam kết mọi video 60 phút luôn xử lý xong trong 15–20 phút. Thời gian phụ thuộc độ dài, số câu, mạng, model, RAM, GPU và bước kiểm tra âm thanh.
-
-## 8. Lưu thành phẩm lên Google Drive — tùy chọn
-
-Nếu chỉ cần lưu video trên máy, bạn có thể bỏ qua phần này.
-
-Thiết lập một lần bằng tài khoản Google của bạn:
-
-1. Mở [Google Cloud Console](https://console.cloud.google.com/), chọn hoặc tạo một project để dùng cho kho video.
-2. Trong thư viện API, bật **Google Drive API**.
-3. Cấu hình màn hình đồng ý của ứng dụng: tên ứng dụng, email liên hệ và đối tượng sử dụng. Nếu đang ở chế độ Testing, thêm email sẽ đăng nhập vào danh sách người dùng thử.
-4. Tạo thông tin đăng nhập OAuth loại **Desktop app** và tải file JSON. Đây là file cấu hình để ứng dụng mở trang Google cho bạn đăng nhập; không phải mật khẩu Google và cũng không phải Gemini API key.
-5. Trong DuanLayLink, mở **Kho cloud → Thiết lập lần đầu**, chọn JSON vừa tải và bấm **Lưu cấu hình**.
-
-Tên mục trong trang Google có thể khác theo giao diện/tài khoản. Người cài đặt có thể đối chiếu [hướng dẫn ứng dụng desktop của Google](https://developers.google.com/identity/protocols/oauth2/native-app). Không gửi mật khẩu hoặc mã xác nhận qua chat để thiết lập.
-
-Sau đó:
-
-1. Bấm **Kết nối Google Drive**, tự đăng nhập trong trang Google và quay lại ứng dụng.
-2. Chọn video đã qua QA kỹ thuật, bấm **Tải / tiếp tục lên Drive**.
-3. Đợi ứng dụng xác minh file đã tải, không chỉ nhìn số phần trăm đã gửi.
-4. Mở bản trên Drive để kiểm tra trước khi quyết định giải phóng MP4 trên máy.
-
-Nếu đóng nhầm tab đăng nhập, bấm **Hủy đăng nhập** rồi kết nối lại. Tải lại trình duyệt không tự hủy phiên đang chờ.
-
-Nút **Giải phóng MP4** chỉ dọn đúng thành phẩm local sau khi kiểm tra bản Drive, không phải xóa toàn bộ dự án. Tính năng tải Drive không sao lưu đầy đủ database, nguồn, phụ đề và cache. Muốn chuyển máy để chỉnh tiếp vẫn cần sao lưu dữ liệu làm việc. Đăng nhập cloud có thể cần làm lại trên máy hoặc tài khoản Windows khác.
-
-## 9. Dữ liệu nằm ở đâu? Cần giữ những gì?
-
-Các vị trí dưới đây là cấu hình mặc định; `.env` có thể đổi nơi lưu.
-
-| Vị trí | Ý nghĩa |
-| --- | --- |
-| `storage/app.db` | Sổ quản lý dự án, câu chữ và trạng thái. Đây là nguồn dữ liệu chính, không được coi là file rác. |
-| `storage/projects/<mã dự án>/` | Video nguồn, ảnh nhận dạng, phụ đề, giọng, cấu hình và thành phẩm của từng video. |
-| `storage/projects/<mã dự án>/output/video_vi.mp4` | Vị trí thành phẩm thông thường sau khi xuất thành công. Ưu tiên tải qua giao diện để đúng bản hiện hành. |
-| `storage/models/` | Các model tải về để chạy AI cục bộ. Xóa có thể khiến chức năng tương ứng không dùng được. |
-| `storage/voices/` | Dữ liệu giọng đã đăng ký. Cần giữ nếu muốn dùng lại giọng đó. |
-| `tools/` | Công cụ đi kèm như VideoSubFinder và runtime dịch local. Các file chương trình/DLL là thành phần cần thiết. |
-| `assets/fonts/` | Font của mẫu phụ đề cùng giấy phép sử dụng. |
-| `.env` và file khóa riêng | Cấu hình, thông tin xác thực. Giữ riêng, không đăng công khai. |
-| `storage/audits/` | Kết quả kiểm chứng thật được tạo khi chạy audit. Các lượt thử cũ đã được dọn; thư mục sẽ xuất hiện lại nếu chạy audit mới. |
-| `storage/maintenance/` | Nhật ký nguyên nhân lỗi và báo cáo dọn dẹp mới nhất. Không giữ bản nén của các file thử đã bỏ. |
-
-Để sao lưu khi chuyển máy, dừng ứng dụng rồi sao lưu `storage/app.db` cùng `storage/projects`; thêm bộ giọng, model và cấu hình nếu muốn dùng tiếp như máy cũ. Thông tin đăng nhập được bảo vệ theo tài khoản Windows có thể cần cấu hình/đăng nhập lại. Chỉ chép MP4 thành phẩm không đủ để tiếp tục chỉnh sửa dự án.
-
-File JSON/SRT/ASS là dữ liệu trao đổi hoặc kết quả xuất, không thay thế database. Không tự sửa/xóa JSON để cố thay đổi trạng thái dự án.
-
-### Tạo giọng cho video dài và đo tốc độ CPU
-
-Trong tab **Tạo Giọng**, chọn một giọng rồi bấm **Nghe thử giọng đã chọn** để tạo mẫu bằng đúng giọng, tốc độ và màu giọng hiện tại. Trình phát cho nghe lại mẫu; đổi giọng rồi nghe tiếp để so sánh. Mẫu không sửa câu, bản dịch hoặc giọng đã tạo của dự án. Khi có tác vụ đang chạy, cần dừng/chờ xong trước khi tạo mẫu để tránh tranh tài nguyên. Mẫu được xử lý bằng cùng đường tạo âm thanh và cache như giọng đầy đủ.
-
-Nếu dự án đã có một câu ngắn trong cache khớp chính xác giọng/tốc độ/phiên bản, nghe thử sẽ dùng câu đó (1,5–15 giây) để tránh gọi dịch vụ lại. Không dùng âm thanh của giọng khác thay thế. Nếu chưa có cache và Edge trả `NoAudioReceived`, dịch vụ chưa cung cấp được âm thanh; thông báo sẽ hiện nguyên nhân. `Method Not Allowed`/HTTP405 ngay sau cập nhật thường là máy chủ chưa nạp endpoint mới: mở lại máy chủ khi hết tác vụ, rồi Ctrl+F5.
-
-Lựa chọn giọng/tốc độ/màu giọng được nhớ riêng theo dự án trong trình duyệt này. Nút **Dùng làm mặc định cho dự án mới** đặt lựa chọn ban đầu cho dự án chưa có cấu hình riêng; không ghi đè giọng các dự án đã chọn. Nút tạo giọng ghi rõ tên đang chọn để dễ kiểm tra trước khi chạy. Nếu giọng đã lưu chưa sẵn sàng, ứng dụng yêu cầu chọn lại thay vì tự đổi sang giọng khác. Xóa dữ liệu trình duyệt hoặc chuyển trình duyệt/máy sẽ mất các lựa chọn này.
-
-Muốn đổi giọng giữa chừng: chọn giọng mới rồi bấm **Dừng lượt cũ và dùng giọng đã chọn**, xác nhận, chờ worker cũ dừng rồi ứng dụng mới gửi lượt mới. Việc chọn dropdown đơn thuần không đổi tác vụ đang chạy. Cache đúng giọng mới sẽ dùng lại; câu chưa có cache cần tạo lại, không thể chuyển các câu đã đọc bằng giọng cũ thành giọng mới mà không tổng hợp lại. Giọng cũ vẫn còn trong cache để có thể đổi lại. Khi lượt giọng mới hoàn tất, cần render lại để cập nhật video thành phẩm. Tác vụ download/OCR/dịch không bị nút này hủy.
-
-Tiến độ tạo giọng hiển thị bộ đọc thực tế (`edge` hoặc `vieneu`) và loại lỗi gần nhất nếu có. “Câu lỗi 0” không có nghĩa mọi lần gọi đều thành công: hãy xem thêm số lần gọi lỗi/chờ thử lại. Khi Edge đang lỗi, tăng nhiều luồng có thể làm chậm thêm; VieNeu local cần đánh giá CPU/RAM riêng. Trong cùng lượt chạy, các câu trùng đầy đủ nội dung đã chuẩn hóa, giọng, tốc độ và phiên bản dùng chung lần tạo giọng; vẫn giữ file/timing riêng cho từng câu. Các câu khác thiết lập không bị gộp.
-
-Hàng đợi tạo giọng lưu mã cache từng câu, không giữ toàn bộ WAV của video trong RAM. Khi ghép, ứng dụng đọc và kiểm tra lại từng câu; cache mất/hỏng sẽ báo lỗi để chạy lại, không xuất bản giọng thiếu câu. Cache hợp lệ vẫn dùng lại khi tiếp tục hoặc chỉ sửa một câu. Timeline dùng tệp trên đĩa, nên vẫn cần đủ dung lượng trống.
-
-VieNeu giữ một worker; `VIENEU_CPU_THREADS=2` trong `.env` là số luồng tính toán bên trong mô hình, khác số câu chạy đồng thời. Không tăng số worker để tăng tốc trên máy RAM ít. Để so sánh 1/2/4 luồng với câu ngắn, vừa và dài, khi không chạy tác vụ hãy dùng:
-
-```powershell
-python scripts/benchmark_vieneu_cpu.py
-```
-
-Công cụ lưu báo cáo và WAV nghe thử vào một thư mục mới dưới `storage/audits`, đo riêng thời gian nạp mô hình và các lượt đọc sau đó. Nó tạm hoãn nếu có worker VieNeu khác hoặc RAM trống dưới 2 GiB; đây là điều kiện tối thiểu để đo, không bảo đảm đủ bộ nhớ trong mọi tình huống. Không tự thay `.env`, giọng hay dự án. Sau khi nghe kiểm tra kết quả và xem `suggested_threads` trong báo cáo có trạng thái `measured`, có thể đặt `VIENEU_CPU_THREADS` tương ứng, rồi mở lại máy chủ khi hết tác vụ. Chưa có phép đo hoàn tất thì giữ mặc định 2. Đổi số luồng không xóa cache giọng hiện có.
-
-## 10. Những lỗi thường gặp
-
-| Hiện tượng | Kiểm tra và xử lý |
-| --- | --- |
-| Không vào được giao diện | Mở `start_server.bat`, xem lỗi trong cửa sổ máy chủ, kiểm tra đúng địa chỉ/cổng. |
-| Có nút mới nhưng bấm báo không tìm thấy chức năng | Mở lại máy chủ sau khi cập nhật, rồi Ctrl+F5. |
-| Không tải được Bilibili 1080p | Kiểm tra quyền xem/cookie và thông báo của nguồn. Không coi video chất lượng thấp hơn là 1080p. |
-| Nhận dạng không có câu hoặc sai nhiều | Kiểm tra đoạn mẫu có chữ/thoại, chọn đúng chế độ và khoanh đúng ROI. |
-| Dịch bị chờ quota hoặc lỗi key | Kiểm tra Gemini API Keys và lỗi được báo; đợi hoặc thay key hợp lệ. Thêm key cùng project không bảo đảm có quota độc lập. |
-| Giọng không phát ra hoặc dịch vụ đọc lỗi | Nghe thử, kiểm tra mạng/runtime, RAM và thông báo; chạy lại bước tạo giọng. |
-| Lời đọc tràn sang câu sau | Xem nhóm câu tràn, rút gọn đúng nghĩa hoặc dùng công cụ sửa timing; nghe lại thay vì tăng tốc vô hạn. |
-| Chữ Việt chưa che hết chữ Trung | Sửa ROI, blur/độ đậm nền; kiểm tra bằng khung preview thật. |
-| Đã thấy MP4 nhưng chưa tải được bản giao | Kiểm tra render và QA đã hoàn tất; file tạm hoặc kết quả chưa qua kiểm tra chưa phải thành phẩm. |
-| Hết dung lượng | Kiểm tra dung lượng video/model; dọn bản tải nén đã giải nén hoặc cache tạm, không xóa database hay nguồn đang cần chỉnh. |
-
-## 11. Nếu cần người khác sửa hoặc bảo trì hệ thống
-
-Thử nghiệm tăng tốc OCR bằng video chỉ chứa vùng phụ đề được tách riêng trong `scripts/benchmark_ocr_roi.py`; chưa dùng làm mặc định. Ví dụ: `python scripts/benchmark_ocr_roi.py <video> <roi.json> --starts 30 900 1800 --seconds 20 --rounds 2 --output <thu-muc-audit-moi>`. Công cụ cần VideoSubFinder và NVENC đang hoạt động, chạy trên mẫu có sẵn, không sửa dự án. Chỉ chạy khi máy rảnh để so sánh thời gian. Cần xem ảnh gốc và đối chiếu chữ/timing; số câu, độ tin cậy OCR hoặc kết quả trùng với cách cũ chưa đủ chứng minh đúng. Thử nghiệm ngày 24/10 phát hiện cách giữ độ phân giải gốc có thể bỏ một chữ dù báo độ tin cậy 99%, nên chưa được đưa vào pipeline.
-
-Không cần đọc phần này để dùng ứng dụng. Nó giúp chỉ đúng nơi khi nhờ người kỹ thuật kiểm tra:
-
-- `web/`: giao diện bạn nhìn thấy trong trình duyệt.
-- `src/api/`: nhận yêu cầu từ giao diện.
-- `src/pipeline/`: điều phối các bước, xuất video và kiểm tra đầu ra.
-- `src/ocr/`, `src/stt/`, `src/translation/`, `src/tts/`: nhận chữ, nghe thoại, dịch và tạo giọng.
-- `src/download/`, `src/providers/`, `src/cloud/`: tải nguồn và làm việc với dịch vụ bên ngoài.
-- `tests/`: bộ kiểm tra để tránh làm hỏng chức năng khi sửa code.
-- `scripts/`: công cụ hỗ trợ, kiểm chứng và thiết lập; không cần chạy lần lượt để dùng ứng dụng.
-
-Muốn kiểm tra phần mềm khi bảo trì: cài `requirements-dev.txt`, chạy `python -m pytest -q`. Bộ test dùng dữ liệu tạm và chặn các lời gọi provider mạng đã quy định; audit video/dịch vụ thật chạy riêng. Test đạt không thay thế việc xem/nghe video thành phẩm.
-
-Các video/âm thanh thử cũ, script gắn cứng với một lần thử, model thử chưa được tích hợp và bản nén tài liệu cũ đã được xóa. Nhật ký nguyên nhân lỗi được giữ tại `storage/maintenance/BUG_REGRESSIONS.md`; đường dẫn artifact lịch sử trong đó có thể không còn tồn tại.
-
-**Các file trong `tests/` dùng lại được**, không phải mỗi file chỉ kiểm tra một lần. Mỗi lần sửa chương trình, chạy lại chúng để phát hiện việc làm hỏng tải video, dữ liệu câu, dịch, tạo giọng hoặc xuất video. Các test này tạo dữ liệu tạm riêng rồi dọn sau khi chạy; không cần giữ các video thử cũ để chạy lại. Những script audit còn giữ hỗ trợ kiểm tra trên dịch vụ/video thật khi cần, khác với dữ liệu đầu ra cũ đã bị xóa.
-
-
-### Upload lớn có thể tiếp tục
-
-Trong **Dự án mới**, dùng nút **Tải video từ máy này lên server**. Trình duyệt gửi các phần tối đa 8 MiB; tiến độ dựa trên byte server đã xác nhận. Mất kết nối tạm thời sẽ thử lại có giới hạn. Nếu đóng hoặc tải lại trang, đăng nhập cùng tài khoản, mở Dự án mới và chọn **Chọn lại tệp để tiếp tục** ở phiên tải dở; phải chọn lại cùng tệp. Dấu vân tay mẫu kiểm tra tên, kích thước và dữ liệu đầu/cuối; đây không phải hash toàn bộ tệp gốc. API có hỗ trợ expected_sha256 toàn file khi client cung cấp.
-
-Sau khi đủ byte, server đọc metadata và giải mã mẫu đầu/giữa/cuối. Trạng thái **VERIFYING** có thể chờ tài nguyên nếu máy đang chạy công đoạn nặng. Có thể đóng trang, rồi quay lại bấm **Kiểm tra kết quả** hoặc làm mới danh sách. Chỉ khi kiểm định đạt mới tạo dự án; bước tải/nhập media của dự án vẫn sử dụng quy trình hiện có. Kiểm tra mẫu không chứng minh mọi khung hình ngoài mẫu đều lành lặn.
-
-**Tạm dừng tải** dừng sau mảnh hiện tại, giữ phần đã nhận. **Hủy phiên** đóng phiên nhưng không xóa byte ngay; dữ liệu chờ chính sách dọn được nghiệm thu ở Đợt 4. Phiên không hoạt động hết hạn sau UPLOAD_SESSION_HOURS; giới hạn hiện tại tối đa ba phiên hoạt động mỗi tài khoản. Không xóa thủ công storage/uploads/sessions khi còn cần nối lại.
-
-Các ngưỡng upload nằm trong .env.example; MIN_FREE_DISK_START_BYTES/MIN_FREE_DISK_RUNTIME_BYTES ở Đợt 1 áp dụng cho tiếp nhận upload, chưa phải kiểm tra đĩa xuyên suốt OCR/TTS/render của Đợt 2. MAX_SOURCE_VIDEO_DURATION_SECONDS giới hạn toàn video nguồn; MAX_VIDEO_DURATION_SECONDS hiện hữu vẫn áp dụng ở luồng xử lý đoạn đã chọn. Giới hạn dung lượng tổng mặc định hiện hữu vẫn là 500 MiB, không tự tăng lên 2 GiB.
-
-Migration thêm hai bảng phiên/mảnh và cột Project.source_upload_id có index duy nhất; không xóa hoặc thay thế bảng dự án cũ. Sau khi cập nhật backend cần khởi động lại khi máy rảnh để nạp schema/API mới.
-
-Khi chạy trực tiếp/LAN, để TRUSTED_PROXY_IPS=[]. Với proxy cục bộ đã xác định, có thể cấu hình TRUSTED_PROXY_IPS=["127.0.0.1"] rồi khởi động lại. Không dùng ["*"]. SERVER_PUBLIC_URL phải khớp địa chỉ HTTPS được cấu hình thật; điền URL không tự tạo đường hầm.
-
-
-### Link truy cập từ xa đang cấu hình
-
-Mở **https://nhunhi.tail343939.ts.net/** trên máy khác hoặc điện thoại dùng mạng khác, rồi đăng nhập bằng tài khoản **DuanLayLink** được admin cấp. Người dùng mở link Funnel không cần cài Tailscale. Admin vào **Quản lý máy chủ → Chia sẻ truy cập** để sao chép link hoặc tạo lời mời. Nếu giao diện cũ còn lưu, nhấn Ctrl+F5.
-
-Link cần máy chủ đang bật, backend đang chạy và Tailscale kết nối. Funnel đã được bật chạy nền, trỏ tới http://127.0.0.1:8088; có thể kiểm tra bằng lệnh `tailscale funnel status`. Không mở port modem. Nếu đổi tên thiết bị/tailnet/URL, cập nhật SERVER_PUBLIC_URL trong .env và nạp lại server khi rảnh.
-
-Đã thử truyền hơn 100 MiB qua IP relay Internet công khai với tài khoản/server audit riêng, cùng kiểm tra đăng nhập public trên server thật. Đây chưa thay thế xác nhận từ máy vật lý thứ hai; không phải cam kết uptime hoặc tốc độ video dài.
-
-
-### Tác vụ bị gián đoạn, tạm dừng và tiếp tục
-
-Trong chế độ máy chủ nhiều người dùng, tác vụ dừng do khởi động lại, thiếu đĩa hoặc lỗi I/O được phân biệt bằng **INTERRUPTED / Bị gián đoạn**. Khởi động server và mở dự án không tự chạy lại OCR/TTS hay gọi dịch vụ giọng đọc. Các dự án mới tạo chưa gửi tác vụ vẫn giữ trạng thái chờ, không bị đánh dấu gián đoạn chỉ vì khởi động lại.
-
-Khi đang chạy, người gửi tác vụ hoặc admin có thể bấm **Tạm dừng an toàn** ở bảng hoạt động. OCR/TTS dừng theo điểm kiểm tra; render dừng tiến trình FFmpeg và bỏ file encode chưa hoàn tất. Lời gọi dịch vụ/inference đang thực hiện có thể cần thời gian trả về trước khi dừng; đây không phải dừng tức thời mọi thao tác. Hủy tác vụ vẫn là thao tác riêng với trạng thái CANCELLED.
-
-Mở dự án bị gián đoạn sẽ có bảng **Tác vụ bị gián đoạn**, lý do và nút **Kiểm tra và tiếp tục**. Chọn dùng thiết lập hiện tại trong Studio hoặc thiết lập của lượt trước. Nếu nguồn, phụ đề, ROI, giọng/thiết lập hay phiên bản xử lý đã thay đổi, hệ thống báo phần khác biệt và hỏi xác nhận trước khi gửi tác vụ mới. Chỉ cache đúng nội dung và còn hợp lệ được tái sử dụng; phần thiếu/hỏng cần tạo lại. Tác vụ cũ chưa có chữ ký đầu vào yêu cầu xác nhận chạy lại.
-
-Dữ liệu phụ đề trong database, kể cả danh sách/câu cố ý để trống, là có thẩm quyền. File JSON cũ không được dùng để lấp lại nội dung đã xóa khi kiểm tra tiếp tục.
-
-Các lượt tạo giọng/render mới trong SERVER_MODE ghi vào **attempts/** riêng. Database chỉ công nhận kết quả khi token quyền ghi, lượt chạy, trạng thái và đầu vào vẫn hợp lệ. Nếu hủy hoặc mất quyền trước lúc công bố, bản trước vẫn được giữ; thư mục chưa công nhận được đánh dấu UNCOMMITTED_ATTEMPT và chưa tự xóa. Tệp cũ dùng đường dẫn truyền thống vẫn được đọc khi chưa có con trỏ mới; không di chuyển hàng loạt dự án cũ. Chế độ CLI/local không bật SERVER_MODE tiếp tục dùng luồng đường dẫn cũ.
-
-MIN_FREE_DISK_START_BYTES được kiểm tra trước tác vụ; MIN_FREE_DISK_RUNTIME_BYTES được kiểm tra tại các vòng xử lý và qua bộ giám sát tác vụ nặng. Nếu thiếu đĩa, giải phóng dung lượng bằng cách có kiểm chứng rồi kiểm tra tiếp tục. Khi SQLite cũng không thể ghi do hết đĩa, trạng thái lỗi có thể chỉ còn trong bộ nhớ/log; khởi động/đối chiếu lại khi ổ đĩa hoạt động để ghi nhận gián đoạn. Không làm đầy ổ chứa dự án để thử lỗi.
-
-Giọng từng câu có cache riêng: đổi một câu có thể dùng lại các câu không đổi; đổi giọng sẽ cần tạo giọng tương ứng. OCR trên ảnh VSF có cache kết quả theo pixel/nội dung ảnh và phiên bản nhận dạng; một lượt quét video chưa hoàn tất không tự trở thành checkpoint hoàn tất. Encode render đã hoàn thành và khớp checkpoint có thể dùng lại để tiếp tục QC; encode còn dở phải chạy lại.
-
-Phần này chưa triển khai tự dọn attempts/cache, sao lưu bắt buộc ra kho ngoài hoặc kiến trúc nhiều worker. Giữ một backend theo launcher hiện tại.
-
-### Sao lưu có đối chiếu tệp bắt buộc
-
-Trong **Quản lý máy chủ → Sao lưu**, tạo bản sao khi máy rảnh. Chỉ nhãn **VALIDATED_PASS / Đạt · REQUIRED đã đối chiếu** mới là gói đã kiểm tra danh mục file bắt buộc từ snapshot DB. FAILED_INCOMPLETE là còn thiếu tệp DB đang tham chiếu; FAILED_CORRUPT_SOURCE là checksum/size khác mốc đã lưu. Không xóa tham chiếu hoặc file để ép bản sao đạt. Các báo cáo lỗi hiển thị số vấn đề và đường dẫn mẫu; manifest.json trong thư mục bản sao giữ danh sách đầy đủ.
-
-Theo lựa chọn hiện tại, gói đạt được sao chép sang **D:\DuanLayLinkBackups**. Cấu hình nằm ở SERVER_BACKUP_DIRECTORY; SERVER_BACKUP_ALLOW_SAME_DISK=true cho phép bản sao cục bộ. C: và D: hiện cùng ổ vật lý: nhãn LOCAL_REPLICA_VERIFIED và LOCAL_RESTORE_DRILL_PASS không chứng minh chịu được hỏng ổ, không cho phép xóa dữ liệu gốc. Tệp thiếu không được tự tạo lại trong lúc backup.
-
-Nút **Phục hồi thử** đọc lại gói đã sao chép, phục hồi vào storage/restore_drills mới rồi kiểm DB/tất cả REQUIRED. Dữ liệu đang dùng không bị ghi đè. Khi muốn chuyển cloud, kết nối Google Drive ở Kho cloud, rồi dùng **Lưu Google Drive** và **Phục hồi thử** cho gói đạt. Chức năng Drive đã có test transport giả lập; chưa có tài khoản Drive thật được nghiệm thu cho gói hệ thống này.
-
-Nếu database/máy chủ cũ không dùng được nhưng còn ZIP trên D:, phục hồi bằng lệnh dưới đây, thay tên gói và chọn một thư mục mới ngoài projects đang dùng:
-
-```powershell
-python scripts/server_backup.py restore-package "D:\DuanLayLinkBackups\TEN_GOI.zip" --destination "D:\DuanLayLinkRestoreMoi"
-```
-
-Xem restore.env trong thư mục mới trước khi cấu hình máy chủ dùng dữ liệu phục hồi. Phiên đăng nhập/lời mời/quyền sửa cũ bị thu hồi; DPAPI, model và công cụ có thể cần thiết lập lại trên máy khác. Gói sao lưu có dữ liệu riêng và cấu hình tham chiếu: giữ trong kho riêng của admin. Chi tiết kiểm chứng và giới hạn: docs/PHASE3_ACCEPTANCE.md.
-
-### Dọn dữ liệu và đối chiếu giọng lỗi (admin)
-
-Vào **Quản lý máy chủ → Dọn dữ liệu** rồi bấm **Xem trước dữ liệu có thể dọn**. Server lập danh sách giữ hiệu lực 10 phút; chọn từng mục được phép và bấm **Xóa các mục đã chọn**, đọc xác nhận trước khi thực hiện. Chưa bấm xóa thì candidate mới chưa bị xóa. Mục còn tham chiếu, có người đọc, đang xử lý hoặc chưa đủ 24h sẽ bị khóa/bỏ qua. Nếu trạng thái thay đổi sau preview, cần xem trước lại. `DELETE_FAILED` hiển thị lỗi hệ điều hành; xử lý nguyên nhân khóa/quyền rồi xem trước lại để retry. Không có nút xóa toàn bộ nguồn/model/dự án trong luồng này.
-
-Thành phẩm gốc bị khóa khi chỉ có bản sao D: cùng ổ vật lý. Chế độ server cũng chặn đường xóa project/MP4 cũ và sweeper tự dọn để không đi vòng qua preview/reader guard.
-
-Trong mục **Đối chiếu và đặt lại tham chiếu giọng của công đoạn lỗi**, chọn dự án rồi đối chiếu. Chỉ khi đủ điều kiện hệ thống mới hiện nút xác nhận số tham chiếu thiếu. Đặt lại chỉ bỏ `voice_audio_path`/`voice_duration` không có tệp; giữ chữ Việt và thời gian, có biên bản trước/sau được đưa vào backup. Đây không phải tạo lại âm thanh. Muốn dùng giọng cho dự án đã đặt lại, chủ động chạy lại Tạo Giọng sau đó; không tự gọi provider.
-
-`SERVER_BACKUP_ROOT=D:\DuanLayLinkBackups\snapshots` đặt vùng snapshot và gói làm việc trên D: để tránh nhân nhiều video trên C:. ZIP bản sao ở D:\DuanLayLinkBackups; phục hồi thử từ giao diện ở D:\DuanLayLinkBackups\restore_drills. Bản legacy trên C: vẫn được catalog giữ lại. Sau phục hồi, các phiên preview/reset trước đó hết hiệu lực, cần đăng nhập và xem trước mới.
-
-Chi tiết điều kiện, bằng chứng và giới hạn: docs/PHASE4_ACCEPTANCE.md.
-
-
-### Bảo trì tệp cũ ngày 26/10/2026
-
-Đợt kiểm tra tiếp theo sửa dịch một số câu và tiếp tục dịch trong chế độ server, dùng đúng thành phẩm của lượt đã công bố khi Chạy tất cả, giữ cấu hình/đầu ra cũ nếu ghi ROI hoặc thay file tải thất bại. VideoSubFinder 6.10 có quy ước mã thoát riêng: ứng dụng đối chiếu bản công cụ, dấu hoàn tất của chính lượt quét và log lỗi; không coi vài ảnh đã xuất là quét xong. Cache quét cũ sẽ cần quét lại theo phiên bản mới và checksum video. Bộ dò dự phòng được ghi rõ là opencv-rapidocr. Không tự bỏ qua câu OCR cần duyệt hoặc hạ ngưỡng timing/âm thanh.
-
-Kiểm định lại toàn luồng trong kho riêng, dùng dự án đã có làm nguồn chỉ đọc:
-
-```powershell
-python scripts/audit_full_pipeline.py MA_DU_AN --mode fresh --check-source
-# Kiểm tra bản chữ đã duyệt với giọng/render mới, có ghi rõ phần được dùng lại:
-python scripts/audit_full_pipeline.py MA_DU_AN --mode reviewed
-# Tiếp tục đúng kho audit sau khi đối chiếu/sửa câu trong database audit:
-python scripts/audit_full_pipeline.py MA_DU_AN --mode fresh --resume-dir storage/audits/TEN_LUOT
-```
-
-Lệnh dùng dịch vụ thật, có thể dùng quota API; thực hiện ngoài pytest khi máy rảnh. Audit mới có database/projects riêng dưới storage/audits, không sửa dự án gốc. Kết quả có nguồn/checksum, câu, task, RAM và kiểm định file thật. `passed: false` cùng lỗi kiểm duyệt/provider/QC cần được xử lý; không đổi nhãn để ép đạt. Chạy kiểm định video không có nghĩa đã duyệt toàn bộ nghĩa bản dịch hoặc giọng nghe tự nhiên.
-
-Nếu mẫu xuất vẫn lộ chân chữ gốc, xem khung hình tại đúng cue rồi chỉnh ROI/phần đệm che và render lại; tăng vùng che có thể che thêm hình nên cần xem lại các cảnh khác. Thay phần đệm/font/nền che chỉ cần render/QA, giọng đúng cấu hình vẫn dùng được. Đợt nghiệm thu 26/10 giữ thay đổi vùng che trong kho audit riêng, không tự đổi cấu hình dự án đang dùng. Chi tiết kết quả: `docs/FOLLOWUP_ACCEPTANCE_20261026.md`.
-
-Sau bản sửa kiểm định/cache ngày 26/10, các manifest tải Range cũ sẽ được tải lại nếu không khớp đầy đủ URL nguồn (bao gồm máy chủ). Cache giọng có dấu `:` trong tên giọng/nội dung/thiết lập dùng khóa mới để tránh nhầm âm thanh; cache cũ không nhập nhằng vẫn được dùng. Không cần xóa cache thủ công. Manifest giọng sai cấu trúc không còn làm bước tiếp tục bị văng lỗi. Kiểm định video từ chối lỗi giải mã kể cả khi FFmpeg trả mã thoát 0; nếu bị từ chối, kiểm tra/tải lại nguồn thay vì bỏ qua lỗi. Khởi động lại backend khi hết tác vụ để nạp thay đổi.
-
-Giữ mã test hồi quy trong tests/ và các công cụ audit/benchmark có tham số dùng lại được. Các đầu ra thử nghiệm đã kết thúc, thư mục pytest tạm và bản sao chưa qua kiểm định được đối chiếu riêng với dữ liệu thật trước khi dọn. Không coi model/runtime đang hỗ trợ dịch local là rác chỉ vì dịch vụ chưa chạy.
-
-Đã gỡ 4 helper dùng một lần có đường dẫn mẫu/thông tin đăng nhập cũ gắn cứng: audit_funnel_upload.py, audit_phase4_live.py, apply_failed_voice_reset.py, release_phase2.py. Dùng giao diện quản trị hiện hành cho đối chiếu giọng/sao lưu; các công cụ server_backup/run_small_server và audit cách ly dùng lại vẫn giữ. Đã xóa một video audit có SHA-256 trùng bản phục hồi được giữ. Các đường dẫn helper/đầu ra lịch sử trong tài liệu nghiệm thu không phải hướng dẫn vận hành hiện tại.
-
-Đợt dọn này chưa hoàn tất: công cụ duyệt tự động chặn xóa thư mục đệ quy; xem storage/maintenance/cleanup_report.json để biết số đã dọn, checksum dữ liệu được bảo vệ và phần bị chặn. Không báo rằng toàn bộ thư mục cũ đã được xóa. Kế hoạch chờ ở cleanup_plan.json cần kiểm kê lại trước lần thực hiện tiếp theo.
-
-
-### Chạy lại QA sau render hoặc cập nhật tool
-
-Render lại làm hết hiệu lực QA của video trước. Sau render, bấm **QA** để kiểm tra bản mới; nếu QA báo lỗi hoặc bị gián đoạn, video chưa được coi là đã đạt. Nút QA dùng `POST /api/projects/{id}/verify`, cần quyền ghi và phiên chỉnh sửa trong chế độ server. GET cũ không chạy QA nữa; chương trình tích hợp cần đổi sang POST. Khởi động lại backend khi hết tác vụ và Ctrl+F5 trình duyệt để nạp bản sửa đồng bộ. Kết quả QA kỹ thuật không thay thế duyệt nội dung từng cue.
+CLI `run-all` mặc định dùng nguồn `auto`, tốc độ `+0%`; thêm `--extraction-mode hardsub` để yêu cầu OCR hoặc `--extraction-mode stt` để nghe lời thoại. Các ví dụ `+15%` là lựa chọn minh họa. `approve-source --auto-resolve` có thể tự chọn biến thể cho cue nghi vấn, chỉ dùng sau khi hiểu và kiểm tra lựa chọn đó. `main.py serve` mặc định cổng 8088; ví dụ trên chỉ định 9000 cho khớp launcher cá nhân. Tên chiến lược timing `cluster-budget-v1` trong báo cáo khác với phiên bản backend mà launcher kiểm tra (`cluster-budget-v3`).
+
+### 2. Các công cụ kiểm thử, Benchmark & Chẩn đoán độc lập
+
+*Lưu ý:* Luôn chạy các script này **ngoài pytest**, sử dụng thư mục đầu ra mới trong `storage/maintenance/` để không ghi đè dữ liệu dự án thực tế.
+
+Kiểm thử hồi quy ngoại tuyến chạy bằng `python -m pytest -q`. Bộ fixture trong `tests/conftest.py` cô lập database/thư mục tạm và chặn các đường gọi mạng provider trong bài test; audit video/provider thật bên dưới là bước kiểm chứng riêng. Với thử nghiệm tối ưu, ghi rõ công đoạn sẽ tích hợp vào dự án chính và tiêu chí đo chấp nhận; giữ bằng chứng đang dùng và chỉ dọn các đường dẫn thử nghiệm đã xác minh theo yêu cầu.
+
+- **Đo hiệu năng các cỡ batch dịch thuật Gemini:**
+  So sánh thời gian và tỷ lệ thành công của các kích thước batch khác nhau (ví dụ 100 câu so với 60 câu) trên dữ liệu phụ đề thực tế:
+  ```powershell
+  python scripts/benchmark_translation_batches.py MA_DU_AN --output storage/maintenance/ten_audit_dich --sizes 100 60
+  ```
+- **Audit cô lập quy trình căn giọng Bước 7 (`cluster-budget-v1`):**
+  Chạy kiểm định và mô phỏng xếp lịch âm thanh trên một bản sao độc lập của dự án:
+  ```powershell
+  python scripts/audit_budget_workflow.py MA_DU_AN --output storage/maintenance/ten_audit_timing --voice-only --shorten
+  ```
+- **Chẩn đoán ảnh và câu nghi vấn OCR:**
+  ```powershell
+  python scripts/audit_ocr_review.py --project MA_DU_AN --output storage/maintenance/ten_audit_ocr --source-samples 6 --controls 6
+  ```
+- **Đo đạc chi tiết toàn bộ pipeline qua link video:**
+  ```powershell
+  python scripts/profile_video_pipeline.py --url "LINK_VIDEO" --output storage/maintenance/ten_profile_moi
+  ```
+- **So sánh luồng Auto và thao tác từng bước:**
+  ```powershell
+  python scripts/compare_video_workflows.py --checkpoint-project MA_DU_AN --output storage/maintenance/ten_so_sanh
+  ```
+- **Benchmark giọng đọc VieNeu GPU CUDA:**
+  ```powershell
+  python scripts/benchmark_vieneu.py --rounds 3 --output storage/maintenance/ten_do_vieneu
+  python scripts/benchmark_vieneu_batches.py --reference storage/maintenance/ten_do_vieneu/summary.json --output storage/maintenance/ten_batch_moi --rounds 3
+  ```
+- **Kiểm chứng chất lượng nghe mù A/B VieNeu:**
+  ```powershell
+  python scripts/verify_vieneu_quality.py --reference storage/maintenance/ten_do_vieneu/summary.json --candidate storage/maintenance/ten_batch_moi/summary.json --output storage/maintenance/quality_verification_moi
+  python scripts/verify_vieneu_quality.py --output storage/maintenance/quality_verification_moi --prepare-blind
+  ```
+  Chạy theo thứ tự: baseline → batch → verification → bộ nghe mù bổ sung. `--prepare-blind` cần verification đã hoàn tất ASR cho đủ 40 cặp. Baseline/candidate phải khớp corpus, runtime, giọng, đủ số vòng và các điều kiện mà script kiểm tra; benchmark batch yêu cầu CUDA. Các audit lịch sử có thể đã được dọn, không dùng đường dẫn cũ như dữ liệu mặc định có sẵn. Kết quả ASR chẩn đoán không thay thế đánh giá nghe.
+- **Đo tối ưu I/O đọc video trong OCR:**
+  ```powershell
+  python scripts/benchmark_ocr_recheck.py --project MA_DU_AN_AUDIT --output storage/maintenance/ten_do_io
+  ```
+- **Đo luồng tạo proxy và đối chiếu điểm ảnh:** chạy ngoài pytest, ưu tiên khi không có video khác đang xử lý; kết quả chỉ phản ánh pha proxy trên nguồn và tải máy đã đo.
+  ```powershell
+  python scripts/benchmark_scan_proxy.py --source D:/Video/nguon.mp4 --output storage/maintenance/ten_do_proxy --start 60 --seconds 45 --rounds 3
+  ```
+  So sánh thời gian trung vị và checksum của mọi khung đã giải mã. Chỉ nhận cấu hình nhanh hơn khi giữ đủ khung/mốc và checksum; không dùng một lượt nhanh bất thường để kết luận tốc độ toàn pipeline.
+
+---
+
+## Bảng tra cứu cấu hình `.env`
+
+Dưới đây là các tham số chính và mặc định trong mã nguồn. Khi cần thiết lập, tham khảo `.env.example`; giữ nguyên `.env` đang dùng và không công khai khóa/cookie. Tên model bên dưới là chuỗi cấu hình của ứng dụng, không bảo đảm provider còn cung cấp hoặc tài khoản của bạn có quyền dùng.
+
+| Nhóm tham số | Tên biến môi trường | Mặc định | Ý nghĩa & Hướng dẫn |
+| :--- | :--- | :--- | :--- |
+| **Vận hành** | `PERSONAL_MODE` | `true` | Chế độ Studio cá nhân, tắt xác thực người dùng phức tạp |
+| | `OFFLINE_MODE` | `false` | Chạy offline hoàn toàn với model máy tính khi bật `true` |
+| | `LOG_LEVEL` | `INFO` | Mức chi tiết log hệ thống |
+| **Lưu trữ & DB** | `DATABASE_URL` | `sqlite:///./storage/app.db` | Đường dẫn cơ sở dữ liệu SQLite chính của ứng dụng |
+| | `STORAGE_DIR` | `./storage/projects` | Thư mục lưu video, âm thanh, phụ đề của các dự án |
+| **Tải video** | `MAX_DOWNLOAD_SIZE_BYTES` | `25769803776` (24 GiB) | Dung lượng tệp tải tối đa (hỗ trợ video 1080p dài) |
+| | `MAX_VIDEO_DURATION_SECONDS` | `21600` (6 giờ) | Thời lượng video tối đa được phép xử lý |
+| | `BILIBILI_PREFERRED_QUALITY` | `80` (1080p) | Mã chất lượng ưu tiên. Chất lượng nguồn còn phụ thuộc vào video và luồng Bilibili cung cấp |
+| | `BILIBILI_COOKIE` | *(để trống)* | Cookie tài khoản Bilibili; chất lượng tải phụ thuộc nguồn và quyền truy cập |
+| | `BILIBILI_SESSDATA` | *(để trống)* | SESSDATA tài khoản nếu dùng thay cấu hình cookie |
+| | `DOUYIN_COOKIE_FILE` | *(để trống)* | Đường dẫn file Netscape cookie cho Douyin |
+| **STT & OCR** | `WHISPER_MODEL_SIZE` | `auto` | Kích thước model Whisper (`large-v3-turbo`, `small`, `base`) |
+| | `WHISPER_DEVICE` | `auto` | Thiết bị chạy Whisper (`auto` dùng CUDA nếu có, hoặc `cpu`) |
+| | `WHISPER_BEAM_SIZE` | `3` | Beam của luồng STT thông thường; bước nghe đối chiếu OCR dùng cấu hình riêng beam 1 |
+| | `OCR_DEVICE` | `auto` | Bộ máy RapidOCR (`auto` dùng CUDA đã kiểm định, hoặc `cpu`) |
+| | `VSF_USE_SCAN_PROXY` | `true` | Cho phép tạo proxy cho lượt dò phụ đề |
+| | `VSF_PROXY_WIDTH` | `960` | Chiều rộng proxy tính bằng pixel |
+| | `VSF_PROXY_FILTER_THREADS` | `1` | Luồng bộ lọc thu nhỏ proxy (1–16); không đổi FPS hay ngưỡng OCR |
+| | `OCR_SOURCE_SPOOL_MAX_BYTES` | `2147483648` (2 GiB) | Trần tệp ảnh nguồn thô dùng chung; 0 dùng lô nhỏ, tối đa 16 GiB |
+| | `OCR_AUDIO_RECHECK` | `true` | Bật tự động đối chiếu âm thanh với chữ OCR |
+| | `AUTO_SKIP_UNCERTAIN` | `true` | Chốt cue nguồn còn nghi vấn bằng ảnh và lời có mốc khi chạy Auto |
+| | `STT_AUDIO_FILTER` | `highpass=f=180,lowpass=f=3400,afftdn=nf=-25` | Bộ lọc làm rõ giọng nói tiếng Trung và khử tạp âm |
+| **Dịch thuật AI** | `GEMINI_API_KEY` | *(điền key của bạn)* | Khóa API Google Gemini (lấy tại Google AI Studio) |
+| | `TRANSLATION_MODEL` | `gemini-3.5-flash-lite` | Model chính thực hiện dịch thuật hàng loạt |
+| | `TRANSLATION_FALLBACK_MODELS`| `gemini-3.1-flash-lite,gemini-3.8-flash,gemini-3.6-flash` | Danh sách model dự phòng theo thứ tự cấu hình |
+| | `TRANSLATION_REPAIR_MODEL` | `gemini-3.8-flash` | Model chuyên dụng sửa các câu lỗi ngữ nghĩa hoặc token |
+| | `TRANSLATION_BATCH_SIZE` | `100` | Số câu gửi dịch trong một batch Gemini |
+| | `LOCAL_TRANSLATION_URL` | *(để trống)* | Địa chỉ runtime HY-MT cục bộ nếu có (`http://127.0.0.1:8091/v1`) |
+| | `AZURE_TRANSLATOR_KEY` | *(để trống)* | Khóa API dịch thuật dự phòng Azure Translator |
+| | `AZURE_TRANSLATOR_REGION` | *(để trống)* | Vùng của tài nguyên Azure nếu tài nguyên yêu cầu |
+| **Giọng đọc TTS** | `TTS_PROVIDER` | `piper` | Bộ đọc mặc định trong cấu hình |
+| | `DEFAULT_TTS_VOICE` | `piper:ngochuyen` | Giọng mặc định của Auto và bộ tạo timeline khi không chỉ định giọng |
+| | `EDGE_TTS_VOICE` | `vi-VN-NamMinhNeural` | Giọng đọc Edge-TTS mặc định |
+| | `VIENEU_DEVICE` | `auto` | Chế độ chạy VieNeu GPU (`auto`, `cuda` hoặc `cpu`) |
+| | `TTS_TRIM_SILENCE` | `true` | Cắt khoảng lặng thừa ở đầu và cuối file âm thanh |
+| | `TTS_TRIM_KEEP_MS` | `60` | Khoảng đệm PCM giữ lại để giọng đọc tự nhiên (ms) |
+| | `TTS_MAX_TOTAL_SPEED` | `1.30` | Trần nén tốc độ tối đa của giọng đọc khi căn timeline |
+| | `ORIGINAL_AUDIO_VOLUME` | `0.15` | Âm lượng tiếng gốc khi trộn lồng tiếng (15%) |
+| | `VOICEOVER_VOLUME` | `1.7` | Âm lượng giọng tiếng Việt khi trộn lồng tiếng (170%) |
+| **Sub & Render** | `SUBTITLE_MODE` | `burn` | Cấu hình cho luồng phụ đề dùng biến này. Auto Studio chọn hình thức xuất theo mục tiêu và cấu hình render |
+| | `DEFAULT_PLATFORM_PRESET` | `auto` | Preset khung hình thương mại mặc định (`auto`, `ytb_16_9`, `tiktok_reels_9_16`, `fb_feed`) |
+| | `DEFAULT_TARGET_PART_SECONDS` | `180` | Thời lượng mục tiêu mỗi tập (60–900 giây) dùng cho keyframe cắt phần |
+| | `VIDEO_ENCODER` | `auto` | Bộ mã hóa video (`auto` ưu tiên GPU NVENC, sau đó CPU libx264) |
+| | `CLEAN_OVERLAYS` | `true` | Bật dọn overlay ở luồng xử lý dùng biến này. Chế độ giữ hình gốc của Studio vẫn giữ chữ và logo nguồn |
+| **Đăng kênh** | `PUBLISHING_CHANNEL_NAME` | `NpzzSub Review` | Tên kênh dùng trong mẫu mô tả và bài đăng tạo bởi `publishing_pack` |
+| | `PUBLISHING_CHANNEL_HANDLE` | `@NpzzSub` | Handle kênh dùng trong mẫu mô tả và bài đăng |
+| | `PUBLISHING_CHANNEL_URL` | `www.youtube.com/@NpzzSub` | Đường dẫn kênh gắn cuối mẫu mô tả xuất bản |
+| | `PUBLISHING_SCHEDULE` | `11:30 & 19:30` | Khung giờ đăng hiển thị trong mô tả gói đăng kênh |
+| | `PUBLISHING_HASHTAGS` | `#NpzzSub,#NpzzSubReview,#Vietsub` | Danh sách hashtag mặc định (phân tách bởi dấu phẩy) |
+
+---
+
+## Nguyên tắc vận hành & An toàn dữ liệu
+
+1. **Cơ sở dữ liệu là nguồn chân lý duy nhất (SSOT):** Bảng phụ đề và các bản ghi trong cơ sở dữ liệu `storage/app.db` là dữ liệu xác thực cao nhất, kể cả trường hợp transcript cố ý để trống. Tuyệt đối không bao giờ che giấu lỗi ghi database bằng cách chỉ xuất file JSON.
+2. **Bảo toàn dữ liệu người dùng:** Giữ nguyên vẹn toàn bộ các dự án trong `storage/projects`. Các đợt kiểm thử hoặc chẩn đoán video thật bắt buộc phải chạy trên một bản sao dự án độc lập (ví dụ qua script `audit_budget_workflow.py`).
+3. **Pytest cô lập và ngoại tuyến:** Pytest chạy cô lập, chặn gọi provider mạng và sử dụng database tạm thời. Không bao giờ hạ ngưỡng tiêu chuẩn kỹ thuật QA để ép bài test vượt qua.
+4. **Tái sử dụng Cache có danh tính:** Chỉ tái sử dụng các file cache đã hoàn tất và có mã nhận dạng khớp chính xác về nguồn, cấu hình, phiên bản engine và tham số xử lý. Một file đang cấp phát dở hoặc một lượt quét chưa xong không được coi là kết quả hoàn thành.
+5. **Dọn dẹp rác đúng quy định:** Chỉ dọn dẹp các tệp tạm thời không còn sử dụng theo đúng yêu cầu; không tạo các bản nén lưu trữ (archive) của những tệp rác đã xóa. Giữ nguyên các tài sản mô hình đã kiểm định (`storage/models/`, `tools/`).

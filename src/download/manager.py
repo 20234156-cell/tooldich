@@ -18,10 +18,16 @@ from urllib.parse import urljoin, urlparse, urlsplit
 
 from pydantic import BaseModel, Field
 import requests
+from requests.adapters import HTTPAdapter
 import yt_dlp
 from config.settings import settings
+from src.jobs.resources import media_timeout, probe_media_duration, check_sufficient_disk_space
 from src.download.mirror_selector import record_mirror_result, select_best_mirrors, get_mirror_health_score
-from src.download.range_downloader import AdaptiveRangeDownloader
+from src.download.range_downloader import (
+    AdaptiveRangeDownloader,
+    canonical_stream_identity,
+    resolve_refreshed_track,
+)
 from src.download.validation import get_ffmpeg_bin, get_ffprobe_bin, validate_download, DownloadValidationResult
 from src.jobs.logger import JobLogger, PipelineException, SystemErrorCodes, TaskCancelled
 from src.providers.base import MediaSource
@@ -64,6 +70,7 @@ def mux_video_audio_copy(
     audio_path: Path,
     output_path: Path,
     timeout: int = 300,
+    duration_seconds: Optional[float] = None,
 ) -> Path:
     """Mux video and audio streams using FFmpeg stream copy without re-encoding."""
     ffmpeg_bin = get_ffmpeg_bin()
@@ -77,9 +84,10 @@ def mux_video_audio_copy(
         "-map", "0:v:0",
         "-map", "1:a:0",
         "-c", "copy",
+        "-movflags", "+faststart",
         str(tmp_out),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=media_timeout(timeout, duration_seconds or probe_media_duration(video_path)))
     if res.returncode != 0:
         tmp_out.unlink(missing_ok=True)
         raise PipelineException(
@@ -106,6 +114,34 @@ class DownloadManager:
         self.progress_callback = progress_callback
         self._last_reported_progress = -1
         self._last_reported_stage = ""
+        self._session_local = threading.local()
+        self._sessions: List[requests.Session] = []
+        self._sessions_lock = threading.Lock()
+
+    def _get_session(self) -> requests.Session:
+        """Return a thread-local keep-alive HTTP session pooled for this manager."""
+        session = getattr(self._session_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            with self._sessions_lock:
+                self._sessions.append(session)
+            self._session_local.session = session
+        return session
+
+    def close(self) -> None:
+        """Close all tracked thread-local HTTP sessions without leaking sockets."""
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions.clear()
+        self._session_local = threading.local()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
 
     def _report_progress(self, percent: int, stage: str = "Đang tải video") -> None:
         """Forward byte progress without flooding the API event history."""
@@ -168,6 +204,7 @@ class DownloadManager:
 
         effective_timeout = timeout or (15, max(settings.REQUEST_TIMEOUT_SECONDS, 60))
         current = validate_download_url(url) if settings.ENFORCE_DOWNLOAD_HOST_ALLOWLIST else url
+        session = self._get_session()
         for _ in range(settings.MAX_DOWNLOAD_REDIRECTS + 1):
             if settings.ENFORCE_DOWNLOAD_HOST_ALLOWLIST:
                 parsed = urlparse(current)
@@ -175,7 +212,7 @@ class DownloadManager:
                 pinned_ip = resolve_and_validate_host(host)
                 if pinned_ip:
                     with _pin_dns_for_thread(host, pinned_ip):
-                        resp = requests.get(
+                        resp = session.get(
                             current,
                             headers=req_headers,
                             stream=True,
@@ -183,7 +220,7 @@ class DownloadManager:
                             allow_redirects=False,
                         )
                 else:
-                    resp = requests.get(
+                    resp = session.get(
                         current,
                         headers=req_headers,
                         stream=True,
@@ -191,7 +228,7 @@ class DownloadManager:
                         allow_redirects=False,
                     )
             else:
-                resp = requests.get(
+                resp = session.get(
                     current,
                     headers=req_headers,
                     stream=True,
@@ -258,16 +295,52 @@ class DownloadManager:
         url_refresher: Optional[Callable[[], str]] = None,
         should_continue: Optional[Callable[[], bool]] = None,
         verify_media: bool = True,
+        track: str = "video",
     ) -> DownloadResult:
         """Sequential single-stream download with resume and failover support."""
+        try:
+            return self._download_sequential_impl(
+                video_url=video_url,
+                headers=headers,
+                target_path=target_path,
+                part_path=part_path,
+                marker_path=marker_path,
+                quiet=quiet,
+                start_time=start_time,
+                url_refresher=url_refresher,
+                should_continue=should_continue,
+                verify_media=verify_media,
+                track=track,
+            )
+        finally:
+            self.close()
+
+    def _download_sequential_impl(
+        self,
+        video_url: str,
+        headers: dict,
+        target_path: Path,
+        part_path: Path,
+        marker_path: Path,
+        quiet: bool = False,
+        start_time: Optional[float] = None,
+        url_refresher: Optional[Callable[[], str]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
+        verify_media: bool = True,
+        track: str = "video",
+    ) -> DownloadResult:
+        """Inner sequential single-stream download implementation."""
         start_time = start_time or time.time()
         downloaded = 0
         total_bytes = 0
         resumed = False
 
-        identity = hashlib.sha256(video_url.encode()).hexdigest()
+        canonical_url = canonical_stream_identity(video_url)
+        identity = hashlib.sha256(canonical_url.encode()).hexdigest()
+        legacy_identity = hashlib.sha256(video_url.encode()).hexdigest()
         try:
-            matching_source = marker_path.read_text(encoding='utf-8').strip() == identity
+            saved_marker = marker_path.read_text(encoding='utf-8').strip()
+            matching_source = saved_marker in (identity, legacy_identity)
         except (OSError, UnicodeError):
             matching_source = False
         if part_path.exists() and not matching_source:
@@ -290,12 +363,14 @@ class DownloadManager:
                 if resp.status_code in (200, 206):
                     break
                 if resp.status_code in (403, 410) and url_refresher:
-                    new_u = url_refresher()
+                    new_u, _ = resolve_refreshed_track(url_refresher, track=track)
                     if new_u:
-                        if new_u != video_url:
+                        if canonical_stream_identity(new_u) != canonical_url:
                             downloaded = 0
                             resumed = False
                             req_headers.pop('Range', None)
+                            canonical_url = canonical_stream_identity(new_u)
+                            identity = hashlib.sha256(canonical_url.encode()).hexdigest()
                         video_url = new_u
                 resp.close()
             except PipelineException:
@@ -332,15 +407,16 @@ class DownloadManager:
         if total_bytes > settings.MAX_DOWNLOAD_SIZE_BYTES:
             resp.close()
             raise PipelineException(SystemErrorCodes.FILE_TOO_LARGE, "Video vượt giới hạn dung lượng đã cấu hình.")
+        check_sufficient_disk_space(target_path.parent, (total_bytes or 2*1024**3) + 2*1024**3, "Tải video")
         last_log_time = time.time()
         milestones_logged = set()
 
         try:
             if mode == 'wb':
                 part_path.unlink(missing_ok=True)
-            # Bind partial bytes to this exact source; do not store signed URLs.
+            # Bind partial bytes to canonical stream identity; do not store signed URLs.
             marker_tmp = marker_path.with_suffix(marker_path.suffix + '.tmp')
-            marker_tmp.write_text(hashlib.sha256(video_url.encode()).hexdigest(), encoding='utf-8')
+            marker_tmp.write_text(identity, encoding='utf-8')
             os.replace(marker_tmp, marker_path)
             with open(part_path, mode) as f:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -417,14 +493,22 @@ class DownloadManager:
         if should_continue and not should_continue():
             raise TaskCancelled("Tác vụ tải video đã bị huỷ bởi người dùng")
 
+        check_sufficient_disk_space(target_path.parent, 4*1024**3, "Tải video")
         ydl_headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
 
+        disk_checked = False
         def ytdlp_progress(info):
+            nonlocal disk_checked
             if should_continue and not should_continue():
                 raise TaskCancelled("Tác vụ tải video đã bị huỷ bởi người dùng")
             if info.get("status") == "downloading":
                 total = info.get("total_bytes") or info.get("total_bytes_estimate") or 0
                 downloaded = info.get("downloaded_bytes", 0)
+                if max(total, downloaded) > settings.MAX_DOWNLOAD_SIZE_BYTES:
+                    raise PipelineException(SystemErrorCodes.FILE_TOO_LARGE, "Video vượt dung lượng tải tối đa.")
+                if total > 0 and not disk_checked:
+                    check_sufficient_disk_space(target_path.parent, total+2*1024**3, "Tải video")
+                    disk_checked = True
                 if total > 0:
                     pct = int((downloaded / total) * 100)
                     speed = (info.get("speed") or 0.0) / (1024 * 1024)
@@ -487,19 +571,24 @@ class DownloadManager:
         audio_backups = media_source.extra.get("audio_backup_urls", [])
         audio_candidates = [audio_url] + [u for u in audio_backups if u and u != audio_url]
 
-        # 1. Probe mirrors with small Range request
-        ranked_video_mirrors = select_best_mirrors(video_candidates, headers)
-        ranked_audio_mirrors = select_best_mirrors(audio_candidates, headers)
+        def prepare_track(candidates, *, is_video):
+            if is_video and media_source.platform == "bilibili":
+                ranked = select_best_mirrors(candidates, headers, sample_bytes=512 * 1024, max_probes=3)
+            else:
+                ranked = select_best_mirrors(candidates, headers)
+            return ranked, self._probe_url(ranked[0], headers)
 
-        chosen_v_url = ranked_video_mirrors[0]
-        chosen_a_url = ranked_audio_mirrors[0]
-
-        supp_v, bytes_v, chosen_v_url = self._probe_url(chosen_v_url, headers)
-        supp_a, bytes_a, chosen_a_url = self._probe_url(chosen_a_url, headers)
+        # Each track can rank and validate its URLs independently.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            video_probe = executor.submit(prepare_track, video_candidates, is_video=True)
+            audio_probe = executor.submit(prepare_track, audio_candidates, is_video=False)
+            ranked_video_mirrors, (supp_v, bytes_v, chosen_v_url) = video_probe.result()
+            ranked_audio_mirrors, (supp_a, bytes_a, chosen_a_url) = audio_probe.result()
 
         total_combined_bytes = bytes_v + bytes_a
         if total_combined_bytes > settings.MAX_DOWNLOAD_SIZE_BYTES:
             raise PipelineException(SystemErrorCodes.FILE_TOO_LARGE, "Tổng video và audio vượt giới hạn dung lượng đã cấu hình.")
+        check_sufficient_disk_space(target_path.parent, (total_combined_bytes or 2*1024**3) + 2*1024**3, "Tải DASH")
         v_host = urlparse(chosen_v_url).netloc
         a_host = urlparse(chosen_a_url).netloc
 
@@ -562,8 +651,6 @@ class DownloadManager:
                                 self._log_milestone(m, comb_dl / 1024 / 1024, total_combined_bytes / 1024 / 1024, comb_speed)
             return cb
 
-        range_downloader = AdaptiveRangeDownloader(default_workers=4)
-
         def download_track(
             is_video: bool,
             track_url: str,
@@ -574,7 +661,13 @@ class DownloadManager:
             supports_range: bool,
         ) -> bool:
             cb = make_track_progress_callback(is_video)
+            track_started = time.monotonic()
+            track_name = "video" if is_video else "audio"
             if supports_range and total_track_bytes > 0:
+                chunk_mib = 2
+                if is_video and media_source.platform == "bilibili" and total_track_bytes >= 128 * 1024**2:
+                    chunk_mib = 4
+                range_downloader = AdaptiveRangeDownloader(default_workers=4, initial_chunk_size=chunk_mib * 1024**2)
                 ok = range_downloader.download_range(
                     url=track_url,
                     headers=headers,
@@ -585,8 +678,15 @@ class DownloadManager:
                     progress_callback=cb,
                     should_continue=should_continue,
                     candidate_mirrors=mirrors,
+                    track=track_name,
                 )
                 if ok:
+                    if self.logger:
+                        elapsed = max(time.monotonic() - track_started, 0.001)
+                        self.logger.log(
+                            stage="DOWNLOADING", status="TRACK_COMPLETED",
+                            message=f"DASH {track_name} Range: {total_track_bytes / 1024**2:.1f} MiB, {elapsed:.2f}s.",
+                        )
                     return True
 
             # Sequential fallback for track if Range not supported
@@ -604,6 +704,7 @@ class DownloadManager:
                 url_refresher=url_refresher,
                 should_continue=should_continue,
                 verify_media=False,  # audio-only m4s is checked after mux
+                track=track_name,
             )
             return res.success
 
@@ -661,7 +762,9 @@ class DownloadManager:
             )
 
         mux_candidate = target_path.with_name(f'{target_path.stem}.validate.tmp{target_path.suffix}')
-        mux_video_audio_copy(temp_v_target, temp_a_target, mux_candidate)
+        check_sufficient_disk_space(target_path.parent, total_combined_bytes+2*1024**3, "Ghép DASH")
+        mux_video_audio_copy(temp_v_target, temp_a_target, mux_candidate,
+                             duration_seconds=getattr(media_source, 'duration', 0) or probe_media_duration(temp_v_target))
 
         # 3. Validate muxed output file (verifying both video and audio streams exist)
         self._report_progress(98, "Đang kiểm tra tính toàn vẹn của tệp đã mux...")
@@ -703,6 +806,27 @@ class DownloadManager:
         validation_mode: str = "fast",
     ) -> DownloadResult:
         """Download media source using DASH parallel downloading, Adaptive Range, or Direct Stream."""
+        try:
+            return self._download_impl(
+                media_source=media_source,
+                dest_path=dest_path,
+                quiet=quiet,
+                url_refresher=url_refresher,
+                should_continue=should_continue,
+                validation_mode=validation_mode,
+            )
+        finally:
+            self.close()
+
+    def _download_impl(
+        self,
+        media_source: Union[MediaSource, str],
+        dest_path: Union[Path, str],
+        quiet: bool = False,
+        url_refresher: Optional[Callable[[], str]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
+        validation_mode: str = "fast",
+    ) -> DownloadResult:
         if should_continue and not should_continue():
             raise TaskCancelled("Tác vụ tải video đã bị huỷ bởi người dùng")
 
@@ -747,6 +871,7 @@ class DownloadManager:
 
             supp_range, total_bytes, final_url = self._probe_url(cand_url, headers)
 
+            check_sufficient_disk_space(target_path.parent, (total_bytes or 2*1024**3)+2*1024**3, "Tải video")
             if supp_range and total_bytes >= 2 * 1024 * 1024:
                 try:
                     range_dl = AdaptiveRangeDownloader(default_workers=4)

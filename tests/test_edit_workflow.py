@@ -132,7 +132,7 @@ def test_change_one_translation_keeps_other_voice_and_archives_delivery(tmp_path
     cues = [Cue(index=1,start=0,end=2,text='你好',vi_text='Chào',voice_audio_path='voiceover/clips/clip_0001.wav',voice_duration=1),
             Cue(index=2,start=3,end=5,text='再见',vi_text='Tạm biệt',voice_audio_path='voiceover/clips/clip_0002.wav',voice_duration=1)]
     runner.get_cues = lambda _: cues
-    runner.save_cues = lambda _id, values: None
+    runner.save_cues = lambda _id, values, **kwargs: None
     (tmp_path/'voiceover/clips').mkdir(parents=True)
     other = tmp_path/'voiceover/clips/clip_0002.wav'
     other.write_bytes(b'valid other voice')
@@ -151,7 +151,7 @@ def test_source_correction_retains_ocr_evidence_and_clears_old_rate(tmp_path):
     cue=Cue(index=1,start=0,end=2,text='original OCR',confidence=95.4,image_path='cues/evidence.jpeg',
             vi_text='old translation',tts_rate='+30%',voice_duration=1,voice_audio_path='old.wav')
     runner.get_cues=lambda _:[cue]
-    runner.save_cues=lambda _id,values:None
+    runner.save_cues=lambda _id,values,**kwargs:None
     result=runner.update_cue('p',1,{'corrected_text':'verified source'})
     assert result.text=='original OCR' and result.confidence==95.4 and result.image_path=='cues/evidence.jpeg'
     assert result.corrected_text=='verified source' and result.vi_text is None
@@ -165,7 +165,7 @@ def test_manual_voice_rate_resets_previous_automatic_fitting(tmp_path):
     runner,state=setup_runner(tmp_path)
     cue=Cue(index=1,start=0,end=3,vi_text='Xin chao',tts_rate='+30%')
     runner.get_cues=lambda _:[cue]
-    runner.save_cues=lambda _id,values:None
+    runner.save_cues=lambda _id,values,**kwargs:None
     buffer=io.BytesIO()
     sf.write(buffer,np.sin(np.arange(24000)*.1)*.1,24000,format='WAV')
     with patch('src.tts.edge.EdgeTTSProvider.synthesize',return_value=(buffer.getvalue(),1)) as synthesize:
@@ -196,7 +196,7 @@ def test_auto_fit_protects_legacy_text_without_compounding_speed(tmp_path):
     runner, state = setup_runner(tmp_path)
     cues = [Cue(index=1, start=0, end=.5, vi_text='Xin chào')]
     runner.get_cues = lambda _: cues
-    runner.save_cues = lambda _id, values: None
+    runner.save_cues = lambda _id, values, **kwargs: None
     calls = []
     def synthesize(text, rate='+0%', **kwargs):
         calls.append(rate)
@@ -235,12 +235,12 @@ def test_empty_database_transcript_does_not_resurrect_old_json(tmp_path, db_sess
 def test_retranslation_clears_old_fitting_and_archives_stale_delivery(tmp_path):
     from types import SimpleNamespace
     runner,state=setup_runner(tmp_path)
-    cues=[Cue(index=1,start=0,end=2,text='source',vi_text='Old',tts_rate='+30%',voice_duration=1,
+    cues=[Cue(index=1,start=0,end=2,text='source',confidence=99,vi_text='Old',tts_rate='+30%',voice_duration=1,
               voice_audio_path='voiceover/clips/clip_0001.wav'),
-          Cue(index=2,start=3,end=5,text='other',vi_text='Keep',voice_duration=1,
+          Cue(index=2,start=3,end=5,text='other',confidence=99,vi_text='Keep',voice_duration=1,
               voice_audio_path='voiceover/clips/clip_0002.wav')]
     runner.get_cues=lambda _:cues
-    runner.save_cues=lambda _id,values:None
+    runner.save_cues=lambda _id,values,**kwargs:None
     (tmp_path/'voiceover').mkdir()
     (tmp_path/'voiceover/timeline.json').write_text('old timing')
     (tmp_path/'output').mkdir()
@@ -294,7 +294,7 @@ def test_run_all_keeps_complete_manual_translations_after_source_review(tmp_path
     from types import SimpleNamespace
     runner, state = setup_runner(tmp_path)
     state.current_state = ProjectState.SOURCE_REVIEWED
-    cues = [Cue(index=1, start=0, end=2, text='verified', vi_text='Manual translation')]
+    cues = [Cue(index=1, start=0, end=2, text='verified', confidence=99, vi_text='Manual translation')]
     runner.get_cues = lambda _: cues
     source = tmp_path/'source.mp4'
     source.write_bytes(b'source')
@@ -309,38 +309,53 @@ def test_run_all_keeps_complete_manual_translations_after_source_review(tmp_path
     assert state.current_state == ProjectState.TRANSLATION_REVIEWED
 
 
-def test_run_all_reuses_reviewed_work_and_preserves_saved_style(tmp_path):
+@pytest.mark.parametrize('budget_checkpoint,auto_fit,rebuild',[(True,True,False),(False,True,True),(True,False,True),(False,False,False)])
+def test_run_all_reuses_reviewed_work_with_current_auto_style(tmp_path,budget_checkpoint,auto_fit,rebuild):
     from unittest.mock import MagicMock
     from src.pipeline.roi import ROISet, ROIBox
     runner, state = setup_runner(tmp_path)
-    cues = [Cue(index=1, start=0, end=2, text='手动修正', vi_text='Đã duyệt', voice_audio_path='voiceover/clips/clip.wav')]
+    cues = [Cue(index=1, start=0, end=2, text='手动修正', corrected_text='手动修正', vi_text='Đã duyệt', voice_audio_path='voiceover/clips/clip.wav')]
     runner.get_cues = lambda _: cues
     for folder in ['source', 'voiceover/clips', 'output']:
         (tmp_path / folder).mkdir(parents=True, exist_ok=True)
     for name in ['source/video_source.mp4', 'voiceover/voiceover.wav', 'voiceover/timeline.json', 'voiceover/clips/clip.wav', 'output/video_vi.mp4']:
         (tmp_path / name).write_bytes(b'valid')
     ROISet(rois=[ROIBox(x=.1, y=.8, width=.8, height=.1)]).save_to_file(tmp_path/'source/roi.json')
-    cfg = RenderConfig(style='bilingual', font_size=38, bg_volume=.12)
+    cfg = RenderConfig(style='cover', font_size=38, bg_volume=.12, brand_position='top_right', cover_effect='blur', compact_caption_blur=True, blur_strength=17, box_opacity=0)
     (tmp_path/'source/subtitle_settings.json').write_text(cfg.model_dump_json())
+    (tmp_path/'output/render_config.json').write_text(cfg.model_dump_json())
     state.get_stage('VOICE_READY').input_hash = runner._voice_input_hash(cues, None, '+0%', '+0Hz')
     # A resumable voice checkpoint needs completed real audio and a manifest,
     # rather than nonempty placeholder files.
     import json
+    import hashlib
     from tests.test_timing_policy import speech
     from src.tts.checkpoint import create_voice_manifest
     for name in ['voiceover/voiceover.wav', 'voiceover/clips/clip.wav']:
         (tmp_path/name).write_bytes(speech(1)[0])
-    (tmp_path/'voiceover/timeline.json').write_text(json.dumps([{'cue_index':1,'actual_start':0,'actual_end':1,'drift':0}]))
-    (tmp_path/'voiceover/manifest.json').write_text(json.dumps(create_voice_manifest(tmp_path, cues, state.get_stage('VOICE_READY').input_hash)))
+    (tmp_path/'voiceover/timeline.json').write_text(json.dumps([{'cue_index':1,'actual_start':0,'actual_end':1,'drift':0,
+        **({'schedule_policy':'cluster-budget-v1'} if budget_checkpoint else {})}]))
+    if budget_checkpoint:
+        (tmp_path/'voiceover/budget_report.json').write_text(json.dumps(dict(version='cluster-budget-v1',
+            source_sha256=hashlib.sha256((tmp_path/'source/video_source.mp4').read_bytes()).hexdigest(),
+            timing_evidence_sha256=None)))
+    manifest=create_voice_manifest(tmp_path,cues,state.get_stage('VOICE_READY').input_hash)
+    manifest['strategy']='cluster-budget-v1' if budget_checkpoint else ('legacy-auto' if auto_fit else 'manual')
+    (tmp_path/'voiceover/manifest.json').write_text(json.dumps(manifest))
     report = MagicMock(passed=True)
     report.to_dict.return_value = {'passed': True}
-    with patch.object(runner, 'run_ocr') as ocr, patch.object(runner, 'run_translation') as translate, patch.object(runner, 'run_voiceover') as voice, patch.object(runner, 'run_render') as render, patch.object(runner, 'verify', return_value=report):
-        result = runner.run_all('p')
-    for operation in [ocr, translate, voice, render]:
+    with patch.object(runner, 'run_ocr') as ocr, patch.object(runner, 'run_translation') as translate, patch.object(runner, 'run_voiceover') as voice, patch.object(runner, 'run_render') as render, patch.object(runner, 'verify', return_value=report), patch('src.pipeline.orchestrator.subprocess.run', return_value=MagicMock(stdout='{"format":{"duration":"3"}}')):
+        result = runner.run_all('p',auto_fit=auto_fit)
+    for operation in [ocr, translate, render]:
         operation.assert_not_called()
+    if not rebuild:
+        voice.assert_not_called()
+    else:
+        voice.assert_called_once()
+        assert voice.call_args.kwargs['budgeted'] is True
     assert result['verification']['passed']
     assert runner.get_subtitle_settings('p')['font_size'] == 38
-    assert runner.get_subtitle_settings('p')['style'] == 'bilingual'
+    assert runner.get_subtitle_settings('p')['style'] == 'cover'
 
 
 @pytest.mark.parametrize('operation',['run_all','run_render'])
@@ -350,7 +365,7 @@ def test_legacy_local_batch_checkpoint_cannot_bypass_alignment_fix(tmp_path,oper
     runner,state=setup_runner(tmp_path)
     state.get_stage('TRANSLATED').engine_version='local_hymt'
     state.get_stage('TRANSLATED').status='COMPLETED'
-    cue=Cue(index=1,start=0,end=2,text='source',vi_text='Keep user correction')
+    cue=Cue(index=1,start=0,end=2,text='source',confidence=99,vi_text='Keep user correction')
     runner.get_cues=lambda _:[cue]
     runner.get_source_video_path=lambda _:tmp_path/'source.mp4'
     runner.get_roi_set=lambda _:SimpleNamespace(get_primary_subtitle_roi=lambda:object())

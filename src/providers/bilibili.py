@@ -1,12 +1,70 @@
+import hashlib
 import json
 import re
+import time
+from functools import reduce
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+import logging
 import requests
 from config.settings import settings
 from src.jobs.logger import SystemErrorCodes, PipelineException
 from src.security.validators import safe_resolve_redirects
 from .base import BaseProvider, VideoMetadata, MediaSource
+
+logger = logging.getLogger(__name__)
+
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+]
+
+_wbi_cache = {"expires_at": 0.0, "img_key": "", "sub_key": ""}
+
+
+def _get_wbi_keys(headers: dict) -> tuple[str, str]:
+    now = time.time()
+    if _wbi_cache["expires_at"] > now and _wbi_cache["img_key"] and _wbi_cache["sub_key"]:
+        return _wbi_cache["img_key"], _wbi_cache["sub_key"]
+    try:
+        resp = requests.get(
+            "https://api.bilibili.com/x/web-interface/nav",
+            headers=headers,
+            timeout=settings.REQUEST_TIMEOUT_SECONDS,
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            wbi_img = data.get("wbi_img", {}) if isinstance(data, dict) else {}
+            img_url = wbi_img.get("img_url", "")
+            sub_url = wbi_img.get("sub_url", "")
+            if img_url and sub_url:
+                img_key = img_url.rsplit("/", 1)[1].split(".")[0]
+                sub_key = sub_url.rsplit("/", 1)[1].split(".")[0]
+                _wbi_cache.update(expires_at=now + 1800, img_key=img_key, sub_key=sub_key)
+                return img_key, sub_key
+    except Exception:
+        pass
+    return "", ""
+
+
+def _sign_wbi(params: dict, headers: dict) -> dict:
+    img_key, sub_key = _get_wbi_keys(headers)
+    if not img_key or not sub_key:
+        return params
+    mixin_key = reduce(lambda s, i: s + (img_key + sub_key)[i], MIXIN_KEY_ENC_TAB, "")[:32]
+    signed = dict(params)
+    signed["wts"] = round(time.time())
+    signed = dict(sorted(signed.items()))
+    signed = {
+        k: "".join(filter(lambda c: c not in "!'()*", str(v)))
+        for k, v in signed.items()
+    }
+    query = urlencode(signed)
+    wbi_sign = hashlib.md5((query + mixin_key).encode()).hexdigest()
+    signed["w_rid"] = wbi_sign
+    return signed
 
 
 class BilibiliProvider(BaseProvider):
@@ -348,26 +406,53 @@ class BilibiliProvider(BaseProvider):
                 timeout=settings.REQUEST_TIMEOUT_SECONDS,
             )
             if resp.status_code != 200:
-                raise PipelineException(
-                    SystemErrorCodes.SOURCE_UNAVAILABLE,
-                    f"Bilibili từ chối lấy luồng video (HTTP {resp.status_code}). "
-                    "Hãy kiểm tra quyền xem và phiên đăng nhập/cookie Bilibili; "
-                    "nếu nguồn đang hạn chế truy cập, thử lại sau hoặc nhập tệp video đã tải.",
+                signed_params = _sign_wbi(params, headers)
+                wbi_resp = requests.get(
+                    "https://api.bilibili.com/x/player/wbi/playurl",
+                    params=signed_params,
+                    headers=headers,
+                    timeout=settings.REQUEST_TIMEOUT_SECONDS,
                 )
+                if wbi_resp.status_code == 200:
+                    resp = wbi_resp
 
-            data = resp.json()
-            if data.get("code") != 0 or "data" not in data:
-                err_msg = data.get("message") or f"Mã lỗi Bilibili {data.get('code')}"
-                raise PipelineException(
-                    SystemErrorCodes.DOWNLOAD_NOT_ALLOWED,
-                    f"Bilibili không cho phép lấy luồng video: {err_msg}",
-                )
+            data = None
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = None
+
+            if not data or data.get("code") != 0 or "data" not in data:
+                page_data = self._playinfo_from_page(meta.source_url or f"https://www.bilibili.com/video/{meta.video_id}")
+                if page_data:
+                    data = {"code": 0, "data": page_data}
+                elif resp.status_code != 200:
+                    raise PipelineException(
+                        SystemErrorCodes.SOURCE_UNAVAILABLE,
+                        f"Bilibili từ chối lấy luồng video (HTTP {resp.status_code}). "
+                        "Hãy kiểm tra quyền xem và phiên đăng nhập/cookie Bilibili; "
+                        "nếu nguồn đang hạn chế truy cập, thử lại sau hoặc nhập tệp video đã tải.",
+                    )
+                else:
+                    err_msg = (data or {}).get("message") or f"Mã lỗi Bilibili {(data or {}).get('code')}"
+                    raise PipelineException(
+                        SystemErrorCodes.DOWNLOAD_NOT_ALLOWED,
+                        f"Bilibili không cho phép lấy luồng video: {err_msg}",
+                    )
 
             res_data = data["data"]
             returned_quality = int(res_data.get("quality", 0))
+            accept_qualities = [int(q) for q in res_data.get("accept_quality", []) if str(q).isdigit()]
+            max_source_quality = max(accept_qualities) if accept_qualities else None
 
-            # Kiểm tra chất lượng bắt buộc: không âm thầm hạ xuống 720p hoặc thấp hơn khi yêu cầu 1080p
-            if requested_qn >= 80 and returned_quality < 80:
+            # Kiểm tra chất lượng: nếu video có 1080p mà Bilibili trả về thấp hơn, yêu cầu cookie/SESSDATA
+            if max_source_quality is not None and max_source_quality < requested_qn:
+                logger.info(
+                    f"Video nguồn chỉ hỗ trợ tối đa chất lượng qn={max_source_quality}, "
+                    f"tự động tải chất lượng cao nhất hiện có (qn={returned_quality})."
+                )
+            elif requested_qn >= 80 and returned_quality < 80:
                 raise PipelineException(
                     SystemErrorCodes.QUALITY_NOT_AVAILABLE,
                     f"Chất lượng 1080p (qn=80) không khả dụng (Bilibili trả về quality={returned_quality}) "
@@ -387,6 +472,25 @@ class BilibiliProvider(BaseProvider):
             }
 
             dash_data = res_data.get("dash")
+            if dash_data and not any(int(v.get('id',0))==returned_quality for v in dash_data.get('video',[])):
+                # Some public responses advertise 720p but expose only lower
+                # DASH tracks. The progressive endpoint can still supply the
+                # requested quality; never select a lower DASH track instead.
+                progressive = requests.get(playurl_api, params={**params, 'fnval': 0}, headers=headers,
+                    timeout=settings.REQUEST_TIMEOUT_SECONDS)
+                if progressive.status_code != 200:
+                    prog_params = _sign_wbi({**params, 'fnval': 0}, headers)
+                    progressive = requests.get("https://api.bilibili.com/x/player/wbi/playurl",
+                        params=prog_params, headers=headers,
+                        timeout=settings.REQUEST_TIMEOUT_SECONDS)
+                if progressive.status_code == 200:
+                    alternate = progressive.json()
+                    candidate = alternate.get('data') or {}
+                    if (alternate.get('code') == 0 and int(candidate.get('quality', 0)) >= requested_qn
+                            and candidate.get('durl') and not candidate.get('dash')):
+                        res_data = candidate
+                        returned_quality = int(candidate['quality'])
+                        dash_data = None
             if dash_data:
                 # 1. Trích xuất video stream phù hợp, ưu tiên AVC/H.264 (codecid=7)
                 video_streams = dash_data.get("video", [])
@@ -508,3 +612,16 @@ class BilibiliProvider(BaseProvider):
                 platform=self.name,
                 error=str(e),
             )
+
+    def _playinfo_from_page(self, url: str) -> Optional[dict]:
+        try:
+            headers = self._get_headers()
+            resp = requests.get(url, headers=headers, timeout=settings.REQUEST_TIMEOUT_SECONDS)
+            if resp.status_code == 200 and "__playinfo__" in resp.text:
+                idx = resp.text.find("__playinfo__")
+                start = resp.text.index("{", idx)
+                info, _ = json.JSONDecoder().raw_decode(resp.text[start:])
+                return info.get("data", info)
+        except Exception:
+            pass
+        return None

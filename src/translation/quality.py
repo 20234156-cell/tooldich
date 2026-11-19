@@ -27,6 +27,9 @@ def quality_issue(source, target):
 def inspect_response(raw, cues, parser):
     """Only known unique IDs may be salvaged; retain valid siblings for selective repair."""
     sources = {c.index: c.effective_source_text for c in cues}
+    from src.ocr.caption_roles import verified_lyrics
+    locked_sources = {c.index for c in cues if c.caption_role == 'background_lyrics'
+                      and verified_lyrics(c,c.caption_role_proof)}
     valid, issues, seen = {}, {}, set()
     for row in response_rows(raw):
         cue_id = row.get('id') if isinstance(row, dict) else None
@@ -36,6 +39,9 @@ def inspect_response(raw, cues, parser):
         try:
             parsed = parser(json.dumps([row], ensure_ascii=False), {cue_id})[cue_id]
             issue = quality_issue(sources[cue_id], parsed['translated'])
+            if (cue_id in locked_sources and parsed.get('source_corrected', '').strip()
+                    not in ('', sources[cue_id])):
+                issue = 'verified_source_changed'
             if issue:
                 issues[cue_id] = issue
             else:
@@ -45,3 +51,16 @@ def inspect_response(raw, cues, parser):
     for cue_id in sources.keys() - seen:
         issues[cue_id] = 'missing_id'
     return valid, issues
+
+
+def salvage_repaired_translation(value):
+    """Keep readable Latin Vietnamese output, with explicit caller provenance."""
+    if not isinstance(value, str):
+        return None
+    value = unicodedata.normalize('NFC', value)
+    value = re.sub(r'[\u3400-\u9fff\uF900-\uFAFF]+', ' ', value)
+    value = ''.join(c for c in value if unicodedata.category(c) not in {'Cc', 'Cs'} or c in '\n\t')
+    value = re.sub(r'\s+', ' ', value).strip()
+    if '\ufffd' in value or not re.search(r'[A-Za-zÀ-ỹ]{2,}', value):
+        return None
+    return value

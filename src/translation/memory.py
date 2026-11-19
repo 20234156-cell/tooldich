@@ -1,9 +1,10 @@
 """Project-scoped translation memory; positions and batch boundaries are not identities."""
 import hashlib
 import json
-import os
 import unicodedata
 import uuid
+
+from src.atomic_files import replace_with_retry
 
 
 def normalized(text):
@@ -19,26 +20,31 @@ def atomic_json(path, value):
     temporary = path.parent / ('.tmp-' + uuid.uuid4().hex[:16])
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, separators=(',', ':')), encoding='utf-8')
-        os.replace(temporary, path)
+        replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 class TranslationMemory:
-    version = 'speech-budget-context-v6'
+    version = 'speech-budget-context-v7'
 
-    def __init__(self, directory, cues, tone, glossary, models, max_tokens):
+    def __init__(self, directory, cues, tone, glossary, models, max_tokens, *, speech_budget_rate=4.0):
         self.directory = directory / 'translation_memory' if directory else None
         self.entries = {}
+        from src.translation.preflight import speech_budgets
+        budgets = speech_budgets(cues, speech_budget_rate)
         sources = [normalized(c.effective_source_text) for c in cues]
         policy = {'engine': self.version, 'tone': tone, 'glossary': glossary,
                   'models': models, 'max_output_tokens': max_tokens, 'target': 'vi'}
         for position, cue in enumerate(cues):
             from src.translation.preflight import soft_budget, structure_findings
             identity = {**policy, 'source': sources[position], 'duration': round(cue.duration, 3),
-                        'budget': soft_budget(cue),
+                        'budget': budgets[cue.index],
                         'structure': [f['reasons'] for f in structure_findings(cues[max(0, position-1):position+1])],
                         'before': sources[max(0, position - 4):position], 'after': sources[position + 1:position + 3]}
+            if cue.caption_role == 'background_lyrics':
+                identity['caption_role'] = cue.caption_role
+                identity['caption_role_proof'] = cue.caption_role_proof
             self.entries[cue.index] = fingerprint(identity)
         self.models = set(models)
         self.completed = {}

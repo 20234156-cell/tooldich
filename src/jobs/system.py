@@ -6,6 +6,8 @@ import shutil
 import zipfile
 import hashlib
 import subprocess
+import threading
+import time
 from typing import Optional, Dict, Any, List, Callable
 from pathlib import Path
 from config.settings import settings
@@ -127,7 +129,7 @@ class ProjectManager:
         return state
 
     def create_project(
-        self, url_or_path: str, trim_start=None, trim_end=None
+        self, url_or_path: str, trim_start=None, trim_end=None, *, timing_requested_at=None
     ) -> Dict[str, Any]:
         """Khởi tạo dự án mới từ URL hoặc file cục bộ.
 
@@ -135,6 +137,9 @@ class ProjectManager:
         Nhận ngay lúc tạo dự án chứ không đợi tới lúc tải, vì cửa chặn thời lượng phải
         biết đoạn cần xử lý dài bao nhiêu trước khi từ chối một video tổng hợp.
         """
+        creation_started_at = time.time() if timing_requested_at is not None else None
+        if settings.OFFLINE_MODE and (url_or_path.strip().startswith(('//', '\\\\')) or '://' in url_or_path):
+            raise PipelineException(SystemErrorCodes.INVALID_URL, 'Chế độ offline chỉ nhận đường dẫn video trên máy; không nhận URL hoặc ổ mạng.')
         detection: DetectionResult = registry.detect_platform(url_or_path)
         if not detection.valid:
             # Bộ nhận diện đã nói rõ vì sao thì chuyển nguyên văn lý do đó ra ngoài;
@@ -222,6 +227,12 @@ class ProjectManager:
             status="COMPLETED",
             message=f"Dự án [{project_id}] đã khởi tạo thành công",
         )
+        if timing_requested_at is not None:
+            from src.jobs.queue import QueuedTask
+            from src.jobs.project_timing import save_task
+            save_task(QueuedTask(f'task_{project_id}_create', project_id, job_id, 'create', state='DONE',
+                                 created_at=timing_requested_at, started_at=creation_started_at,
+                                 finished_at=time.time(), timing_initial_stage='CREATED'))
 
         return {
             "project_id": project_id,
@@ -304,6 +315,8 @@ class ProjectManager:
 
     def _resolve_metadata(self, project_id, source, job_id, logger) -> Dict[str, Any]:
         """Phần thực thi của fetch_and_save_metadata, tách ra để bọc xử lý lỗi."""
+        if settings.OFFLINE_MODE and source.platform != 'local_file':
+            raise PipelineException(SystemErrorCodes.SOURCE_UNAVAILABLE, 'Nguồn này cần Internet. Hãy nhập video đã có trên máy thành dự án mới.')
         provider = registry.get(source.platform)
         if not provider and source.platform != "local_file":
             err_msg = f"Provider không hỗ trợ: {source.platform}"
@@ -355,13 +368,6 @@ class ProjectManager:
                 f"riêng, hoặc tăng MAX_VIDEO_DURATION_SECONDS trong .env nếu bạn thật "
                 f"sự muốn xử lý cả video dài như vậy (sẽ rất lâu và tốn nhiều dung "
                 f"lượng)."
-            )
-            logger.log(
-                stage="RESOLVING",
-                status="FAILED",
-                level="ERROR",
-                message=err_msg,
-                error=SystemErrorCodes.VIDEO_TOO_LONG,
             )
             raise PipelineException(SystemErrorCodes.VIDEO_TOO_LONG, err_msg)
 
@@ -488,6 +494,8 @@ class ProjectManager:
 
         logger = JobLogger(job_id=job_id, project_id=project_id)
 
+        if settings.OFFLINE_MODE and source.platform != 'local_file':
+            raise PipelineException(SystemErrorCodes.SOURCE_UNAVAILABLE, 'Chế độ offline không tải video từ Internet. Video đã lưu vẫn có thể xem và chỉnh sửa.')
         if progress_callback:
             progress_callback(2, "Đang chuẩn bị nguồn tải")
 
@@ -586,11 +594,22 @@ class ProjectManager:
                         if progress_callback else None
                     ),
                 )
+                refresh_lock = threading.Lock()
+                refreshed_cache = {"expires_at": 0.0, "media": None}
+
+                def refresh_media(track: str = "video") -> Optional[MediaSource]:
+                    with refresh_lock:
+                        now = time.monotonic()
+                        if refreshed_cache["media"] is None or now >= refreshed_cache["expires_at"]:
+                            refreshed_cache["media"] = provider.get_media(source.input_url)
+                            refreshed_cache["expires_at"] = now + 15.0
+                        return refreshed_cache["media"]
+
                 download_res = dl_manager.download(
                     media_src,
                     dest_file,
                     quiet=quiet,
-                    url_refresher=lambda: provider.get_media(source.input_url).video_url,
+                    url_refresher=refresh_media,
                     should_continue=should_continue,
                 )
 
@@ -1147,6 +1166,15 @@ class ProjectManager:
         """Lấy toàn bộ dữ liệu của dự án: nguồn, media, transcript, scene, script."""
         detail = self.get_project_status(project_id)
         with SessionLocal() as db:
+            log_query = db.query(JobLog).join(Job, Job.id == JobLog.job_id).filter(Job.project_id == project_id)
+            total_logs = log_query.count()
+            recent_logs = log_query.order_by(JobLog.id.desc()).limit(200).all()
+            detail['logs'] = [dict(id=row.id,job_id=row.job_id,
+                timestamp=row.timestamp.isoformat()+'Z' if row.timestamp else None,
+                stage=row.stage,level=row.level,message=row.message,
+                duration=row.duration,error=row.error) for row in reversed(recent_logs)]
+            detail['log_summary'] = dict(total=total_logs,returned=len(recent_logs),
+                                         limit=200,truncated=total_logs>200)
             media = db.query(Media).filter(Media.project_id == project_id).first()
             transcript = (
                 db.query(Transcript).filter(Transcript.project_id == project_id).first()
@@ -1333,6 +1361,7 @@ class ProjectManager:
         "vi_dub_srt": ("voiceover", "vi.dub.srt", "text/plain; charset=utf-8"),
         "voice_timeline": ("voiceover", "timeline.json", "application/json"),
         "verify_report": ("output", "verify_report.json", "application/json"),
+        "publishing_pack": ("output", "publishing_pack.json", "application/json"),
     }
 
     def get_artifact(self, project_id: str, kind: str):
@@ -1688,7 +1717,7 @@ class ProjectManager:
             media = db.query(Media).filter(Media.project_id == project_id).first()
             downloaded = media is not None
             if media:
-                if media.file_path:
+                if media.file_path and Path(media.file_path).stem.endswith('.trim'):
                     Path(media.file_path).unlink(missing_ok=True)
                 db.delete(media)
             db.commit()
@@ -2423,6 +2452,8 @@ class ProjectManager:
 
         project_id = validate_identifier(project_id, "Project ID")
         proj_dir = safe_project_path(project_id)
+        if proj_dir != settings.storage_path.resolve() / project_id:
+            raise PipelineException(SystemErrorCodes.PATH_TRAVERSAL_BLOCKED, "Thư mục dự án không đúng vị trí lưu trữ.")
 
         with SessionLocal() as db:
             project = db.query(Project).filter(Project.id == project_id).first()
@@ -2434,20 +2465,22 @@ class ProjectManager:
             status = project.status
             # Các bảng con đều khai báo cascade="all, delete-orphan" nên xoá project
             # là dọn sạch source/media/transcript/scene/script/job/log liên quan.
+            removed_files = 0
+            freed_bytes = 0
+            if proj_dir.exists():
+                try:
+                    for item in proj_dir.rglob("*"):
+                        if item.is_file():
+                            freed_bytes += item.stat().st_size
+                            removed_files += 1
+                    shutil.rmtree(proj_dir)
+                except OSError as exc:
+                    raise PipelineException(
+                        SystemErrorCodes.STORAGE_ERROR,
+                        "Chưa xóa hết tệp dự án. Đóng trình phát hoặc tệp đang mở rồi thử xóa lại.",
+                    ) from exc
             db.delete(project)
             db.commit()
-
-        removed_files = 0
-        freed_bytes = 0
-        if proj_dir.exists():
-            for item in proj_dir.rglob("*"):
-                if item.is_file():
-                    removed_files += 1
-                    try:
-                        freed_bytes += item.stat().st_size
-                    except OSError:
-                        pass
-            shutil.rmtree(proj_dir, ignore_errors=True)
 
         return {
             "project_id": project_id,
@@ -2820,7 +2853,7 @@ class ProjectManager:
         return zip_path
 
     def create_batch_projects(
-        self, urls: List[str], trim_start=None, trim_end=None
+        self, urls: List[str], trim_start=None, trim_end=None, *, timing_requested_at=None
     ) -> List[Dict[str, Any]]:
         """Khởi tạo hàng loạt dự án từ danh sách URL."""
         results = []
@@ -2829,7 +2862,9 @@ class ProjectManager:
             if not url or url.startswith("#"):
                 continue
             try:
-                res = self.create_project(url, trim_start=trim_start, trim_end=trim_end)
+                res = self.create_project(url, trim_start=trim_start, trim_end=trim_end,
+                                          **({'timing_requested_at': timing_requested_at}
+                                             if timing_requested_at is not None else {}))
                 results.append({"url": url, "success": True, "project": res})
             except Exception as e:
                 results.append({"url": url, "success": False, "error": str(e)})

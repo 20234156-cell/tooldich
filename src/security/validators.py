@@ -298,7 +298,10 @@ def validate_local_file_path(path: Union[Path, str]) -> Path:
     Chặn việc dùng nguồn `local_file` để đọc tệp bất kỳ trên máy chủ (`.env`,
     database, mã nguồn) rồi lấy nội dung ra qua bước download/export.
     """
-    candidate = Path(str(path).strip()).expanduser()
+    raw_path = str(path).strip()
+    if settings.OFFLINE_MODE and (raw_path.startswith(('\\\\', '//')) or '://' in raw_path):
+        raise PipelineException(SystemErrorCodes.BLOCKED_LOCAL_PATH, 'Chế độ offline không nhận video từ ổ mạng hoặc URL.')
+    candidate = Path(raw_path).expanduser()
     try:
         resolved = candidate.resolve()
     except (OSError, RuntimeError):
@@ -306,6 +309,8 @@ def validate_local_file_path(path: Union[Path, str]) -> Path:
             SystemErrorCodes.BLOCKED_LOCAL_PATH, f"Đường dẫn không hợp lệ: {path}"
         )
 
+    if settings.OFFLINE_MODE and str(resolved).startswith(('\\\\', '//')):
+        raise PipelineException(SystemErrorCodes.BLOCKED_LOCAL_PATH, 'Chế độ offline không nhận video từ ổ mạng.')
     if settings.SERVER_MODE:
         from src.server.readers import assert_available
         assert_available(resolved)
@@ -344,6 +349,8 @@ def validate_local_file_path(path: Union[Path, str]) -> Path:
             "Không được dùng tệp nằm trong thư mục cài đặt của hệ thống làm nguồn video",
         )
 
+    if settings.PERSONAL_MODE or settings.OFFLINE_MODE:
+        return resolved
     allowed_dirs = [d.strip() for d in (settings.LOCAL_FILE_ALLOWED_DIRS or "").split(";") if d.strip()]
     if not allowed_dirs:
         raise PipelineException(

@@ -112,9 +112,9 @@ async def middleware(request, call_next):
                 raise HTTPException(403,'Phiên ghi không hợp lệ. Hãy tải lại trang.')
             if user['role']=='viewer' and not path.startswith(('/api/server/lease/','/api/server/preferences','/api/server/logout')):
                 raise HTTPException(403,'Tài khoản chỉ được xem.')
-        if path.startswith('/api/settings') or (mutating and (path.startswith('/api/cloud/drive/') or path=='/api/tts/dictionary' or '/remove-local/' in path)):
+        if path.startswith('/api/settings') or (mutating and (path.startswith(('/api/cloud/drive/','/api/cloud/youtube/')) or path=='/api/tts/dictionary' or '/remove-local/' in path)):
             admin_only(request)
-        if mutating and path in {'/api/cloud/drive/connect','/api/cloud/drive/config','/api/cloud/drive/cancel','/api/cloud/drive/disconnect'}:
+        if mutating and path in {'/api/cloud/drive/connect','/api/cloud/drive/config','/api/cloud/drive/cancel','/api/cloud/drive/disconnect','/api/cloud/youtube/auth/start','/api/cloud/youtube/auth/cancel','/api/cloud/youtube/disconnect'}:
             if not request.client or request.client.host not in {'127.0.0.1','::1','testclient'}:
                 raise HTTPException(403,'Đăng nhập/cấu hình Drive trên máy chủ; máy khách vẫn có thể gửi thành phẩm lên Drive đã kết nối.')
         project_match=re.match(r'^/api/(?:cloud/)?projects/([A-Za-z0-9_-]{1,64})(?:/|$)',path)

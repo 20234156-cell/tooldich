@@ -1,9 +1,13 @@
 import json
+import subprocess
 import time
+import uuid
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
+from fastapi import Query
 
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import (
@@ -47,6 +51,8 @@ ERROR_STATUS = {
     SystemErrorCodes.MISSING_API_KEY: 400,
     SystemErrorCodes.MEDIA_NOT_FOUND: 409,
     SystemErrorCodes.TRANSCRIPT_NOT_FOUND: 409,
+    SystemErrorCodes.OCR_REVIEW_REQUIRED: 409,
+    SystemErrorCodes.QA_REVIEW_REQUIRED: 409,
     SystemErrorCodes.SCENES_NOT_FOUND: 409,
     SystemErrorCodes.SCRIPT_NOT_FOUND: 409,
     SystemErrorCodes.SOURCE_UNAVAILABLE: 409,
@@ -111,6 +117,15 @@ async def lifespan(app: FastAPI):
             raise RuntimeError('Cần SERVER_MODE và tài khoản quản trị trước khi mở mạng ngoài loopback.')
 
     _recover_interrupted_jobs()
+    if not settings.SERVER_MODE:
+        from src.jobs.project_timing import recover_interrupted_tasks
+        with SessionLocal() as db:
+            project_ids = [project_id for project_id, in db.query(Project.id)]
+        root = settings.storage_path.resolve()
+        for project_id in project_ids:
+            project_root = (root / project_id).resolve()
+            if project_root.parent == root:
+                recover_interrupted_tasks(project_root)
     if settings.SERVER_MODE:
         from src.server.tasks import recover
         recover()
@@ -131,15 +146,24 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
-    if settings.AI_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
+    if not settings.OFFLINE_MODE and settings.AI_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
         try:
             from src.ai.gemini_client import GeminiClient
             GeminiClient.check_configured_models()
         except Exception:
             pass
+    from src.notifications.telegram import bot_service
+    try:
+        from src.notifications.assistant import load_config
+        load_config()
+        bot_service.start()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning('Chưa khởi động được Telegram; Studio vẫn hoạt động.')
     try:
         yield
     finally:
+        bot_service.stop()
         if backup_task:
             backup_task.cancel()
             import asyncio
@@ -181,6 +205,18 @@ app.add_middleware(
 
 @app.middleware("http")
 async def auth_token_middleware(request: Request, call_next):
+    if settings.PERSONAL_MODE and not settings.OFFLINE_MODE:
+        path = request.url.path
+        if path == '/api/server/session':
+            return JSONResponse({'enabled': False, 'offline': False, 'personal': True})
+        if path.startswith(('/api/server/', '/api/uploads')):
+            return JSONResponse(status_code=403, content={'message': 'Chức năng máy chủ chia sẻ đã tắt trong bản cá nhân.'})
+    if settings.OFFLINE_MODE:
+        path = request.url.path
+        if path == '/api/server/session':
+            return JSONResponse({'enabled': False, 'offline': True})
+        if path.startswith(('/api/cloud/', '/api/server/', '/api/uploads', '/api/settings/keys')):
+            return JSONResponse(status_code=403, content={'message': 'Chức năng này đã tắt trong chế độ offline.'})
     if settings.SERVER_MODE:
         return await call_next(request)
     token = settings.API_TOKEN
@@ -212,6 +248,28 @@ async def auth_token_middleware(request: Request, call_next):
 app.add_middleware(RateLimitMiddleware)
 from src.server.access import middleware as server_access_middleware
 app.middleware('http')(server_access_middleware)
+
+
+@app.middleware('http')
+async def source_learning_outbox(request: Request, call_next):
+    """User edits are auditable proposals unless the evidence flow confirms them."""
+    import re
+    from src.ocr.learning import review_context, export_pending
+    from starlette.concurrency import run_in_threadpool
+    tracked = request.method in {'POST','PATCH','DELETE'} and bool(re.fullmatch(
+        r'/api/projects/[^/]+/(cues/[^/]+(?:/(?:split|merge|recrop/apply|review-decision))?|cue-history/[^/]+/undo)',
+        request.url.path))
+    if not tracked:
+        return await call_next(request)
+    with review_context(decided_by='người dùng'):
+        response = await call_next(request)
+    if response.status_code < 400:
+        try:
+            await run_in_threadpool(export_pending)
+        except Exception:
+            # DB history is already durable; never claim JSONL was exported.
+            response.headers['X-OCR-Learning-Pending'] = '1'
+    return response
 
 
 @app.exception_handler(PipelineException)
@@ -247,6 +305,7 @@ def _task_payload(task) -> Dict[str, Any]:
         "action": task.action,
         "owner":task.owner,
         "state": task.state,
+        "cancel_requested": task.cancel_requested,
         "progress": task.progress,
         "stage": task.stage,
         "result": res,
@@ -290,11 +349,105 @@ def _require_editable(project_id: str) -> str:
     return project_id
 
 
+class YouTubeUploadRequest(BaseModel):
+    title_index: int = Field(default=0, ge=0, le=2)
+    force: bool = False
+
+
+def _telegram_admin(request: Request):
+    from src.cloud.routes import local_mutation
+    local_mutation(request)
+    if settings.SERVER_MODE:
+        from src.server.access import admin_only
+        admin_only(request)
+
+
+@app.get('/api/notifications/telegram/status')
+def telegram_status(request: Request):
+    _telegram_admin(request)
+    from src.notifications.telegram import bot_service
+    from src.notifications.assistant import system_snapshot
+    bot_service.schedule_refresh()
+    return dict(**bot_service.status(), snapshot=system_snapshot())
+
+
+@app.post('/api/notifications/telegram/config')
+def configure_telegram(request: Request, payload: Any = Body(...)):
+    _telegram_admin(request)
+    if not isinstance(payload, dict):
+        raise HTTPException(400, 'Cấu hình Telegram phải là một đối tượng JSON.')
+    from src.notifications.telegram import bot_service
+    from src.notifications.assistant import save_config
+    bot_service.stop(notify=False)
+    try:
+        save_config(payload)
+    except Exception:
+        bot_service.start()
+        raise HTTPException(400, 'Không lưu được cấu hình. Kiểm tra các trường và kết nối YouTube trước khi xác nhận tài khoản.') from None
+    bot_service.start()
+    return telegram_status(request)
+
+
+@app.post('/api/notifications/telegram/test')
+def test_telegram_notification(request: Request):
+    _telegram_admin(request)
+    from src.notifications.telegram import notify_project_event
+    return notify_project_event('assistant', 'TEST', '✅ Trợ lý DuanLayLink đã nhận cấu hình. Gửi /help hoặc link video để bắt đầu.')
+
+
+@app.get('/api/projects/{project_id}/youtube-upload')
+def youtube_upload_status(project_id: str):
+    project_id = _require_project(project_id)
+    from src.cloud.youtube_upload import receipt_status
+    return receipt_status(project_id)
+
+
+@app.get('/api/projects/{project_id}/drive-archive')
+def drive_archive_status(project_id: str):
+    project_id = _require_project(project_id)
+    from src.cloud.metadata_archive import receipt_status
+    return receipt_status(project_id)
+
+
+@app.post('/api/projects/{project_id}/youtube-upload')
+def start_youtube_upload(project_id: str, request: Request, payload: YouTubeUploadRequest = YouTubeUploadRequest()):
+    from src.cloud.routes import local_mutation
+    local_mutation(request)
+    project_id = _require_editable(project_id)
+    from src.cloud import youtube_upload
+    from src.cloud.drive import require_online
+    require_online()
+    youtube_upload.video_path(project_id)
+    if not youtube_upload.config().get('refresh_token'):
+        raise CloudError('Hãy kết nối YouTube trước.')
+    task=queue.submit(project_id,'YOUTUBE_UPLOAD',youtube_upload.upload,project_id,
+        title_index=payload.title_index,force=payload.force,inject_cancel=True,update_pipeline_job=False)
+    return _task_payload(task)
+
+
+@app.get('/api/projects/{project_id}/disk-usage')
+def project_disk_usage(project_id: str):
+    project_id = _require_project(project_id)
+    from src.pipeline.media_storage import disk_usage
+    return disk_usage(settings.storage_path / project_id)
+
+
+@app.post('/api/projects/{project_id}/release-media')
+def release_project_media(project_id: str, payload: Dict[str, Any] = Body(...)):
+    project_id = _require_editable(project_id)
+    if payload.get('confirm') is not True:
+        raise HTTPException(400, 'Cần xác nhận giải phóng media bằng confirm=true.')
+    from src.pipeline.media_storage import release_media, disk_usage
+    root = settings.storage_path / project_id
+    return dict(**release_media(root), **disk_usage(root))
+
+
 # --------------------------- PROJECTS ---------------------------
 
 
 class BatchCreateRequest(BaseModel):
     urls: List[str]
+    auto_start: bool = False
     trim_start: Optional[str] = None
     trim_end: Optional[str] = None
 
@@ -303,7 +456,8 @@ class BatchCreateRequest(BaseModel):
 def create_project(payload: CreateProjectRequest):
     """Tạo project mới từ URL."""
     res = manager.create_project(
-        payload.url, trim_start=payload.trim_start, trim_end=payload.trim_end
+        payload.url, trim_start=payload.trim_start, trim_end=payload.trim_end,
+        **({'timing_requested_at': time.time()} if payload.auto_start else {}),
     )
     return sanitize_response_data(res)
 
@@ -312,16 +466,40 @@ def create_project(payload: CreateProjectRequest):
 def batch_create_projects_endpoint(payload: BatchCreateRequest):
     """Khởi tạo hàng loạt dự án từ danh sách URL."""
     return manager.create_batch_projects(
-        payload.urls, trim_start=payload.trim_start, trim_end=payload.trim_end
+        payload.urls, trim_start=payload.trim_start, trim_end=payload.trim_end,
+        **({'timing_requested_at': time.time()} if payload.auto_start else {}),
     )
+
+
+def _project_eta(project_id, job_status=None, task=None):
+    """Legacy step estimates cannot override the current queue/job outcome."""
+    task = task if task is not None else queue.get_by_project(project_id)
+    task_state = getattr(task, 'state', None)
+    if task_state in {'FAILED', 'CANCELLED', 'INTERRUPTED'}:
+        return None
+    if task is None and job_status in {'FAILED', 'CANCELLED', 'INTERRUPTED'}:
+        return None
+    estimate = tracker.snapshot(project_id)
+    if estimate and task_state in {'RUNNING', 'QUEUED'} and estimate.get('state') in {'done', 'failed'}:
+        return None
+    return estimate
 
 
 @app.get("/api/projects", response_model=List[ProjectListItem])
 def list_projects(limit: int = 100, status: Optional[str] = None):
     """Danh sách project."""
+    from src.jobs.project_timing import manual_verifications, summarize
     items = manager.list_projects(limit=limit, status=status)
     for item in items:
-        item["eta"] = tracker.snapshot(item["id"])
+        task = manual_verifications.get(item["id"]) or queue.get_by_project(item["id"])
+        item["eta"] = _project_eta(item["id"], item.get("job_status"), task)
+        item["timing"] = summarize(settings.storage_path / item["id"], stage=item["stage"], live_task=task)
+        if task and task.state in {'RUNNING', 'QUEUED'}:
+            item["active_task"] = dict(action=task.action, state=task.state, progress=task.progress,
+                                       cancel_requested=task.cancel_requested)
+        elif item["stage"] == 'OCR_READY' and item.get('error_code') == 'OCR_REVIEW_REQUIRED':
+            cues = orchestrator.get_cues(item["id"])
+            item['ocr_review_remaining'] = sum(cue.needs_source_review for cue in cues) if cues else None
     return items
 
 
@@ -332,29 +510,26 @@ def get_project(project_id: str):
     detail = manager.get_project_detail(project_id)
     task = queue.get_by_project(project_id)
     detail["task"] = _task_payload(task) if task else None
-    detail["eta"] = tracker.snapshot(project_id)
+    detail["eta"] = _project_eta(project_id, (detail.get("job") or {}).get("status"), task)
     return sanitize_response_data(detail)
 
 
 @app.delete("/api/projects/{project_id}")
 def delete_project(project_id: str):
-    """Xoá hẳn dự án: huỷ tác vụ đang chạy, xoá dữ liệu và toàn bộ tệp.
-
-    Không hoàn tác được. Dùng cho dự án bị lỗi, dự án không cần nữa, hoặc dự án đang
-    chạy dở mà người dùng muốn dừng hẳn.
-    """
+    """Xóa vĩnh viễn dự án sau khi tác vụ đã dừng hoàn toàn."""
     if settings.SERVER_MODE:
         raise HTTPException(409,"Xóa dự án trực tiếp đã khóa; dùng màn hình Dọn dữ liệu để đối chiếu và bảo vệ bản gốc.")
     project_id = validate_identifier(project_id, "Project ID")
-    task = queue.get_by_project(project_id)
-    if task and task.state == "RUNNING":
-        raise HTTPException(
-            status_code=409,
-            detail=f"Dự án đang có tác vụ đang chạy ({task.action}). Hãy huỷ tác vụ trước khi xoá dự án.",
-        )
-    # Huỷ trước rồi mới xoá, tránh tác vụ nền ghi lại tệp vừa xoá
-    queue.forget_project(project_id)
-    return manager.delete_project(project_id)
+    from src.pipeline import auto_workflow
+    with auto_workflow.lock, queue._lock:
+        task = queue.get_by_project(project_id)
+        if task and (task.state in {"QUEUED", "RUNNING"} or (task.future and not task.future.done())):
+            detail = ("Tác vụ đang dừng. Hãy đợi đến khi hiện Đã hủy rồi xóa."
+                      if task.cancel_requested else "Hãy hủy tác vụ đang chờ hoặc đang chạy trước khi xóa dự án.")
+            raise HTTPException(status_code=409, detail=detail)
+        result = manager.delete_project(project_id)
+        queue.forget_project(project_id)
+        return result
 
 
 @app.post("/api/projects/{project_id}/source", response_model=TaskResponse)
@@ -398,6 +573,8 @@ def start_voiceover(project_id: str, payload: VoiceoverRequest = VoiceoverReques
         auto_fit=payload.fit_to_video,
         shorten_to_fit=payload.shorten_to_fit,
         repair_existing=payload.repair_existing,
+        budgeted=True,
+        auto_merge_timing=True,
     )
     return _task_payload(task)
 
@@ -407,10 +584,10 @@ def voiceover_timing(project_id: str):
     """Screen current DB text and show only identity-matching measured failures."""
     project_id = _require_project(project_id)
     from src.tts.timing import translation_timing_risks
-    from src.translation.preflight import structure_findings, timing_cause
+    from src.translation.preflight import structure_findings, timing_cause, timing_repair_rows
     cues = orchestrator.get_cues(project_id)
     result = dict(risks=translation_timing_risks(cues), structure_findings=structure_findings(cues),
-                  issues=[], stale_report=False, mean_drift=None)
+                  issues=[], causes=[], stale_report=False, mean_drift=None)
     path = orchestrator.get_project_dir(project_id)/'voiceover/timing_failures.json'
     if path.is_file():
         try:
@@ -418,9 +595,12 @@ def voiceover_timing(project_id: str):
             current_hash = orchestrator._voice_input_hash(cues, saved.get('voice'), saved.get('rate', '+0%'), saved.get('pitch', '+0Hz'))
             if saved.get('version') == 2 and saved.get('input_hash') == current_hash:
                 known = {cue.index: cue for cue in cues}
-                result['issues'] = [dict(row, text=known[row['cue_index']].vi_text, cause=timing_cause(row))
-                                    for row in saved['issues'] if row['cue_index'] in known]
-                result['mean_drift'] = saved['mean_drift']
+                def describe(rows):
+                    return [dict(row, text=known[row['cue_index']].vi_text, cause=timing_cause(row))
+                            for row in rows if row['cue_index'] in known]
+                issues = describe(saved['issues'])
+                causes = describe(timing_repair_rows(saved.get('timeline', []), saved['issues']))
+                result.update(issues=issues, causes=causes, mean_drift=saved['mean_drift'])
             else:
                 result['stale_report'] = True
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -449,10 +629,11 @@ def list_voices():
     """Danh sách giọng đọc tổng hợp có sẵn."""
     engine = EdgeTTSProvider()
     from src.tts.vieneu import provider as local_provider
+    from src.tts.piper import provider as piper_provider
     return {
         "engine": engine.name,
-        "voices": engine.list_voices() + local_provider.list_voices(),
-        "default": "vi-VN-NamMinhNeural",
+        "voices": piper_provider.list_voices() + engine.list_voices() + local_provider.list_voices(),
+        "default": "piper:ngochuyen",
     }
 
 
@@ -534,15 +715,55 @@ def update_tts_dictionary(payload: Dict[str,str] = Body(...)):
 @app.post("/api/projects/{project_id}/run-all", response_model=TaskResponse)
 def start_run_all(project_id: str, payload: RunAllRequest = RunAllRequest()):
     """Chạy liên tiếp toàn bộ pipeline trong một tác vụ nền."""
+    return _start_auto(project_id, payload)
+
+
+def _start_auto(project_id, payload, translation_repair=None):
     project_id = _require_project(project_id)
+    from src.pipeline import auto_workflow as auto
+    defaults = {}
+    if payload.skip_uncertain is None:
+        defaults['skip_uncertain'] = settings.AUTO_SKIP_UNCERTAIN
+    if payload.voice is None:
+        defaults['voice'] = getattr(settings, 'DEFAULT_TTS_VOICE', settings.EDGE_TTS_VOICE)
+    if payload.translation_provider == 'gemini' and payload.translation_model is None:
+        defaults['translation_model'] = settings.TRANSLATION_MODEL
+    if defaults:
+        payload = payload.model_copy(update=defaults)
+    with auto.lock:
+        active = queue.get_by_project(project_id)
+        if active and active.state in {'RUNNING', 'QUEUED'}:
+            raise PipelineException(SystemErrorCodes.PROJECT_BUSY, 'Dự án đang có tác vụ chạy.')
+        previous = auto.path(project_id).read_bytes() if auto.path(project_id).is_file() else None
+        generation = uuid.uuid4().hex
+        auto.write(project_id, {'version': 1, 'generation': generation, 'state': 'queued',
+                                'subtitle_settings_hash': auto.subtitle_identity(project_id),
+                                'options': payload.model_dump(exclude_none=True), 'updated_at': time.time()})
+        try:
+            return _submit_saved_auto(project_id, payload, generation, translation_repair)
+        except BaseException:
+            if previous is None: auto.path(project_id).unlink(missing_ok=True)
+            else: auto.write_raw(project_id, previous)
+            raise
+
+
+def _submit_saved_auto(project_id, payload, generation, translation_repair=None):
     task = queue.submit(
         project_id,
         "run-all",
-        _run_fast_hardsub_pipeline,
+        _run_auto_with_profile,
         project_id,
         inject_cancel=True,
+        _auto_generation=generation,
+        _translation_repair=translation_repair,
         voice=payload.voice,
         style=payload.subtitle_style,
+        subtitle_preset=payload.subtitle_preset,
+        corner_logo=payload.corner_logo,
+        manual_blur=payload.manual_blur,
+        brand_position=payload.brand_position,
+        workflow_mode=payload.workflow_mode,
+        processing_profile=payload.processing_profile,
         extraction_mode=payload.extraction_mode,
         translation_provider=payload.translation_provider,
         translation_model=payload.translation_model,
@@ -552,8 +773,127 @@ def start_run_all(project_id: str, payload: RunAllRequest = RunAllRequest()):
         auto_fit=payload.fit_to_video,
         shorten_to_fit=payload.shorten_to_fit,
         repair_existing=payload.repair_existing,
+        skip_uncertain=payload.skip_uncertain,
+        audio_mode=payload.audio_mode,
+        voice_volume=payload.voice_volume,
+        bg_volume=payload.bg_volume,
+        font_family=payload.font_family,
+        font_color=payload.font_color,
+        outline_color=payload.outline_color,
+        outline_width=payload.outline_width,
+        font_size=payload.font_size,
+        **{
+            k: v
+            for k, v in (
+                ("platform_preset", payload.platform_preset),
+                ("target_part_seconds", payload.target_part_seconds),
+                ("clean_secondary_captions", payload.clean_secondary_captions),
+            )
+            if v is not None
+        },
     )
     return _task_payload(task)
+
+
+def _run_auto_with_profile(project_id, _auto_generation, progress_callback=None, _translation_repair=None, **kwargs):
+    from src.pipeline import auto_workflow as auto
+    from src.jobs.logger import TaskCancelled, mask_secrets
+    from src.jobs.resources import TaskInterrupted
+    stage = ['Đang tiếp tục Auto']
+    def progress(percent, label):
+        stage[0] = label
+        if progress_callback: progress_callback(percent, label)
+    auto.update(project_id, _auto_generation, state='running', error_code=None,
+                error_message=None, review={}, completion={})
+    try:
+        if _translation_repair is not None:
+            repair = TranslateBatchRequest.model_validate(_translation_repair)
+            orchestrator.run_translation(
+                project_id, tone=repair.tone, target_cues=repair.cues,
+                provider=repair.provider, model=repair.model, batch_size=repair.batch_size,
+                should_continue=kwargs.get('should_continue'),
+                progress_callback=lambda percent, label: progress(int(percent * .35), label),
+            )
+        result = _run_fast_hardsub_pipeline(project_id, progress_callback=progress, **kwargs)
+    except BaseException as exc:
+        code = getattr(exc, 'code', None) or getattr(exc, 'reason', None) or 'UNKNOWN_ERROR'
+        state = 'needs_review' if code == 'OCR_REVIEW_REQUIRED' else 'paused' if isinstance(exc, (TaskCancelled, TaskInterrupted)) else 'failed'
+        auto.update(project_id, _auto_generation, state=state, error_code=code,
+                    error_message=mask_secrets(str(exc)), last_stage=stage[0],
+                    review=auto.review_details(getattr(exc, 'details', None)))
+        raise
+    verification = result.get('verification') or {}
+    completion = {
+        'verified': verification.get('passed') is True,
+        'needs_review': verification.get('fully_passed') is False,
+        'warnings': verification.get('warnings', []),
+        'degraded': verification.get('degraded', []),
+    }
+    auto.update(project_id, _auto_generation, state='complete', last_stage=stage[0], completion=completion)
+    return result
+
+
+@app.get('/api/projects/{project_id}/auto-workflow')
+def get_auto_workflow(project_id: str):
+    from src.pipeline import auto_workflow as auto
+    from src.pipeline.state_machine import ProjectState
+    project_id = _require_project(project_id)
+    try: data = auto.read(project_id)
+    except ValueError as exc:
+        return {'configured': False, 'state': 'invalid', 'guidance': {'tab': 'workflow', 'message': str(exc)}}
+    if not data: return {'configured': False}
+    data = dict(data)
+    task = queue.get_by_project(project_id)
+    active = task and task.state in {'QUEUED', 'RUNNING'}
+    data['busy'] = bool(active)
+    if active and getattr(task, 'action', None) in {'run-all', 'run_all'}:
+        data['state'] = task.state.lower()
+        data['last_stage'] = task.stage
+        data['progress'] = task.progress
+    elif not active and data['state'] != 'complete' and orchestrator.get_state(project_id).current_state == ProjectState.VERIFIED:
+        return dict(configured=True, state='verified', options=data.get('options', {}))
+    elif data['state'] in {'queued', 'running'}:
+        data['state'] = 'interrupted'
+    if (not active and data['state'] == 'complete' and data.get('completion', {}).get('verified')
+            and orchestrator.get_state(project_id).current_state != ProjectState.VERIFIED):
+        data['state'] = 'ready_to_resume'
+        return dict(data, configured=True, guidance={'tab': 'workflow',
+            'message': 'Kết quả QA trước cần kiểm tra lại. Bấm Tiếp tục toàn bộ Auto để cập nhật các bước liên quan.'})
+    if data['state'] == 'needs_review' and data.get('error_code') == 'OCR_REVIEW_REQUIRED':
+        cues = orchestrator.get_cues(project_id)
+        pending = [cue.index for cue in cues if cue.needs_source_review]
+        data['review'] = {'cue_indices': pending}
+        from src.ocr.ascii_recheck import candidate
+        data['source_auto_recovery_available'] = any(candidate(cue) for cue in cues)
+        if cues and (not pending or data.get('options', {}).get('skip_uncertain', settings.AUTO_SKIP_UNCERTAIN)):
+            data['state'] = 'ready_to_resume'
+            return dict(data, configured=True, guidance={'tab': 'workflow',
+                'message': 'Bấm Tiếp tục toàn bộ Auto để chốt nguồn từ bằng chứng và chạy tiếp.'})
+    return dict(data, configured=True, guidance=auto.guidance(data))
+
+
+@app.post('/api/projects/{project_id}/auto-workflow/resume', response_model=TaskResponse)
+def resume_auto_workflow(project_id: str):
+    from src.pipeline import auto_workflow as auto
+    project_id = _require_editable(project_id)
+    with auto.lock:
+        try: data = auto.read(project_id)
+        except ValueError as exc: raise HTTPException(409, str(exc)) from exc
+        if not data:
+            raise HTTPException(409, 'Lượt cũ chưa lưu thiết lập Auto. Chọn giọng/model trong Studio rồi bấm Chạy tự động một lần.')
+        if data['state'] == 'needs_review' and data.get('error_code') == 'OCR_REVIEW_REQUIRED':
+            cues = orchestrator.get_cues(project_id)
+            pending = sum(cue.needs_source_review for cue in cues)
+            from src.ocr.ascii_recheck import candidate
+            if not cues or (pending and not data.get('options', {}).get('skip_uncertain', settings.AUTO_SKIP_UNCERTAIN)
+                            and not any(candidate(cue) for cue in cues)):
+                message = (f'Còn {pending} câu OCR cần kiểm tra trước khi tiếp tục Auto.' if pending
+                           else 'Danh sách phụ đề đang trống. Kiểm tra bước OCR trước khi tiếp tục Auto.')
+                raise HTTPException(409, message)
+        try: payload = RunAllRequest.model_validate(auto.resume_options(project_id, data))
+        except ValueError as exc:
+            raise HTTPException(409, 'Thiết lập Auto đã lưu không hợp lệ. Chọn lại giọng/model trong Studio rồi bấm Chạy tự động.') from exc
+        return start_run_all(project_id, payload)
 
 
 def _run_fast_hardsub_pipeline(
@@ -562,7 +902,7 @@ def _run_fast_hardsub_pipeline(
     style: Optional[str] = None,
     should_continue=None,
     progress_callback=None,
-    extraction_mode: str = "hardsub",
+    extraction_mode: str = "auto",
     translation_provider: str = "gemini",
     translation_model: Optional[str] = None,
     translation_batch_size: Optional[int] = None,
@@ -571,13 +911,47 @@ def _run_fast_hardsub_pipeline(
     auto_fit: bool = True,
     shorten_to_fit: bool = True,
     repair_existing: bool = False,
+    audio_mode: Optional[str] = None,
+    voice_volume: Optional[float] = None,
+    bg_volume: Optional[float] = None,
+    font_family: Optional[str] = None,
+    font_color: Optional[str] = None,
+    outline_color: Optional[str] = None,
+    outline_width: Optional[int] = None,
+    font_size: Optional[int] = None,
+    subtitle_preset: Optional[str] = None,
+    corner_logo: Optional[Literal['keep', 'blur', 'remove', 'npzzsub']] = None,
+    manual_blur=None,
+    brand_position=None,
+    workflow_mode: str = 'custom',
+    processing_profile: Optional[str] = None,
+    skip_uncertain: Optional[bool] = None,
+    platform_preset: Optional[Literal['auto', 'ytb_16_9', 'tiktok_reels_9_16', 'fb_feed']] = None,
+    target_part_seconds: Optional[int] = None,
+    clean_secondary_captions: Optional[bool] = None,
 ):
     """REST queue adapter for the canonical orchestrator flow."""
     from src.pipeline.orchestrator import orchestrator
+    extra = {
+        k: v
+        for k, v in (
+            ("platform_preset", platform_preset),
+            ("target_part_seconds", target_part_seconds),
+            ("clean_secondary_captions", clean_secondary_captions),
+        )
+        if v is not None
+    }
     return orchestrator.run_all(
         project_id,
         voice=voice,
         style=style,
+        subtitle_preset=subtitle_preset,
+        corner_logo=corner_logo,
+        manual_blur=manual_blur,
+        brand_position=brand_position,
+        workflow_mode=workflow_mode,
+        processing_profile=processing_profile,
+        skip_uncertain=skip_uncertain,
         should_continue=should_continue,
         progress_callback=progress_callback,
         extraction_mode=extraction_mode,
@@ -585,6 +959,15 @@ def _run_fast_hardsub_pipeline(
         translation_model=translation_model,
         translation_batch_size=translation_batch_size,
         rate=rate, pitch=pitch, auto_fit=auto_fit, shorten_to_fit=shorten_to_fit, repair_existing=repair_existing,
+        audio_mode=audio_mode,
+        voice_volume=voice_volume,
+        bg_volume=bg_volume,
+        font_family=font_family,
+        font_color=font_color,
+        outline_color=outline_color,
+        outline_width=outline_width,
+        font_size=font_size,
+        **extra,
     )
 
 
@@ -592,7 +975,8 @@ def _run_fast_hardsub_pipeline(
 def get_system_health_endpoint():
     """Lấy thông số tải phần cứng, ổ đĩa và trạng thái GPU."""
     result = manager.get_system_health()
-    result['timing_repair_version'] = 'source-grounded-recovery-v2'
+    result['timing_repair_version'] = 'cluster-budget-v3'
+    result['translation_dispatch_version'] = 'parallel-provider-batches-v1'
     return result
 
 
@@ -676,11 +1060,49 @@ def set_trim(project_id: str, payload: TrimRequest):
 
 
 @app.get("/api/projects/{project_id}/files/{kind}")
-def download_artifact(project_id: str, kind: str):
+def download_artifact(project_id: str, kind: str, target_part_seconds: int = Query(default=180, ge=60, le=900)):
     """Tải một tệp kết quả về máy (chỉ các loại nằm trong danh sách cho phép)."""
     project_id = validate_identifier(project_id, "Project ID")
+    if kind == 'publishing_pack':
+        project_id = _require_project(project_id)
+        if _current_publishing_pack(project_id, target_part_seconds=target_part_seconds) is None:
+            raise HTTPException(409, 'Gói đăng bài chưa có hoặc đã cũ. Hãy tạo lại.')
     path, media_type = manager.get_artifact(project_id, kind)
     return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@app.get('/api/projects/{project_id}/source-preview.mp4')
+def source_preview(project_id: str, compatible: bool = False, download: bool = False):
+    project_id = _require_project(project_id)
+    source = orchestrator.get_source_video_path(project_id)
+    if not compatible:
+        return FileResponse(source, media_type='video/mp4', filename=source.name if download else None)
+    from src.download.validation import get_ffmpeg_bin
+
+    stat = source.stat()
+    preview = source.parent / f'preview-h264-{stat.st_size}-{stat.st_mtime_ns}.mp4'
+    if not preview.is_file():
+        temporary = preview.with_suffix(f'.{uuid.uuid4().hex}.tmp.mp4')
+        try:
+            subprocess.run([
+                str(get_ffmpeg_bin()), '-nostdin', '-v', 'error', '-y', '-i', str(source),
+                '-map', '0:v:0', '-map', '0:a:0?', '-vf', 'scale=-2:min(720\\,ih)',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-pix_fmt', 'yuv420p',
+                '-threads', '4', '-c:a', 'aac', '-ac', '2', '-movflags', '+faststart', str(temporary),
+            ], capture_output=True, check=True, timeout=settings.FFMPEG_TIMEOUT_SECONDS)
+            if not preview.is_file():
+                temporary.replace(preview)
+        except (OSError, subprocess.SubprocessError):
+            if not preview.is_file():
+                raise HTTPException(status_code=503, detail='Không tạo được bản phát tương thích.')
+        finally:
+            temporary.unlink(missing_ok=True)
+    return FileResponse(preview, media_type='video/mp4')
+
+
+@app.get('/api/studio/wordmark.png')
+def studio_wordmark():
+    return FileResponse(Path(__file__).resolve().parents[2] / 'assets/npzzsub-wordmark.png', media_type='image/png')
 
 
 # --------------------------- JOBS ---------------------------
@@ -725,7 +1147,7 @@ def get_job(job_id: str):
 
     task = queue.get_by_project(project_id)
     payload["task"] = _task_payload(task) if task else None
-    payload["eta"] = tracker.snapshot(project_id)
+    payload["eta"] = _project_eta(project_id, payload.get('status'), task)
     return payload
 
 
@@ -763,7 +1185,7 @@ def cancel_job(job_id: str):
                 if proj and proj.status not in (JobStatus.COMPLETED.value, JobStatus.FAILED.value):
                     proj.status = JobStatus.CANCELLED.value
                 db.commit()
-        return {"job_id": job_id, "state": "CANCELLED", "task_id": None}
+        return {"job_id": job_id, "state": job.status, "task_id": None, "cancel_requested": False}
 
     cancelled = queue.cancel(task.task_id)
     return {
@@ -848,12 +1270,38 @@ def start_ocr_endpoint(project_id: str, payload: ExtractionRequest = ExtractionR
     return _task_payload(task)
 
 
+@app.post("/api/projects/{project_id}/source-audio-review", response_model=TaskResponse)
+def start_source_audio_review(project_id: str):
+    project_id = _require_editable(project_id)
+    task = queue.submit(project_id, "source-audio-review", orchestrator.run_audio_source_review,
+                        project_id, inject_cancel=True)
+    return _task_payload(task)
+
+
+@app.post("/api/projects/{project_id}/cues/skip-uncertain")
+def skip_uncertain_source(project_id: str):
+    project_id = _require_editable(project_id)
+    result = orchestrator.skip_uncertain_cues(project_id)
+    cues = orchestrator.get_cues(project_id)
+    if cues and not any(cue.needs_source_review for cue in cues):
+        result.update(approve_cues_endpoint(project_id))
+    return result
+
+
 @app.get("/api/projects/{project_id}/cues")
 def get_cues_endpoint(project_id: str):
     """Lấy danh sách các câu phụ đề đã bóc (kèm ảnh crop, câu gốc, câu sửa, câu dịch)."""
     project_id = validate_identifier(project_id, "Project ID")
     cues = orchestrator.get_cues(project_id)
-    return [c.model_dump() for c in cues]
+    from src.tts.speech_text import subtitle_only_reason
+    result = []
+    for cue in cues:
+        row = cue.model_dump()
+        reason = subtitle_only_reason(cue)
+        if reason:
+            row['subtitle_only_reason'] = reason
+        result.append(row)
+    return result
 
 
 @app.get("/api/projects/{project_id}/cue-images/{file_name}")
@@ -907,6 +1355,85 @@ def apply_cue_recrop(project_id: str, index: int, payload: CueRecropApplyRequest
         return apply(orchestrator, project_id, index, payload.token, payload.text).model_dump()
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.get('/api/projects/{project_id}/learning-review')
+def source_learning_report(project_id: str):
+    from src.ocr.learning import analyze, export_pending
+    project_id = validate_identifier(project_id,'Project ID')
+    errors=[]
+    try:
+        export_pending()
+    except Exception as exc:
+        errors.append('Nhật ký chưa xuất đủ; lịch sử DB vẫn được giữ: '+str(exc))
+    try:
+        result=analyze(orchestrator.get_cues(project_id))
+        result['write_errors']=errors
+        return result
+    except (ValueError,OSError) as exc:
+        raise HTTPException(409,'Không đọc được bộ nhớ học: '+str(exc))
+
+
+@app.get('/api/projects/{project_id}/cue-history')
+def source_review_history(project_id: str, limit: int = 50):
+    from src.database.models import CueReviewRevision
+    from src.ocr.learning import digest,normalized
+    project_id=validate_identifier(project_id,'Project ID')
+    current=digest(normalized(orchestrator.get_cues(project_id)))
+    with SessionLocal() as db:
+        rows=db.query(CueReviewRevision).filter_by(project_id=project_id).order_by(
+            CueReviewRevision.created_at.desc()).limit(max(1,min(limit,100))).all()
+        return {'revisions':[dict(**r.payload,exported=r.exported,
+            can_undo=r.payload['after_hash']==current and r.payload['before_hash']!=current) for r in rows]}
+
+
+@app.get('/api/projects/{project_id}/cues/{index}/review-evidence')
+def source_review_evidence(project_id: str,index: int,extra: bool=False,
+                           target_id: Optional[int]=None,transition: Optional[float]=None):
+    from src.ocr.review_evidence import prepare
+    project_id=validate_identifier(project_id,'Project ID')
+    try:
+        return prepare(orchestrator,project_id,index,extra,target_id,transition)
+    except (ValueError,OSError) as exc:
+        raise HTTPException(409,str(exc))
+
+
+@app.get('/api/projects/{project_id}/review-evidence/{token}/{name}')
+def source_review_image(project_id: str,token: str,name: str):
+    import re
+    from src.ocr.learning import root
+    project_id=validate_identifier(project_id,'Project ID')
+    if not re.fullmatch(r'[a-f0-9]{32}',token) or not re.fullmatch(r'(frame|crop)_[0-9]+\.jpg',name):
+        raise HTTPException(400,'Tên bằng chứng không hợp lệ.')
+    folder=root()/'evidence'/token
+    try:
+        record=json.loads((folder/'manifest.json').read_text(encoding='utf-8'))
+    except (OSError,ValueError):
+        raise HTTPException(404,'Không có bằng chứng.')
+    if record['project_id']!=project_id or not (folder/name).is_file():
+        raise HTTPException(404,'Không có ảnh của dự án này.')
+    return FileResponse(folder/name,media_type='image/jpeg')
+
+
+@app.post('/api/projects/{project_id}/cues/{index}/review-decision')
+def source_review_decision(project_id: str,index: int,payload: Dict[str,Any]=Body(...)):
+    from src.ocr.review_evidence import decide
+    project_id=_require_editable(project_id)
+    try:
+        return decide(orchestrator,project_id,index,payload)
+    except (ValueError,OSError,KeyError,TypeError) as exc:
+        raise HTTPException(409,str(exc))
+
+
+@app.post('/api/projects/{project_id}/cue-history/{revision_id}/undo')
+def source_review_undo(project_id: str,revision_id: str):
+    from src.ocr.review_evidence import undo
+    project_id=_require_editable(project_id)
+    revision_id=validate_identifier(revision_id,'Revision ID')
+    try:
+        return undo(orchestrator,project_id,revision_id)
+    except (ValueError,OSError) as exc:
+        raise HTTPException(409,str(exc))
 
 
 @app.patch("/api/projects/{project_id}/cues/{index}")
@@ -995,13 +1522,36 @@ def approve_cues_endpoint(project_id: str):
     """Xác nhận phụ đề gốc Trung Quốc hợp lệ -> chuyển sang SOURCE_REVIEWED."""
     project_id = _require_editable(project_id)
     state = orchestrator.approve_source_cues(project_id)
-    return state.model_dump()
+    result = state.model_dump()
+    from src.pipeline import auto_workflow as auto
+    with auto.lock:
+        try:
+            profile = auto.read(project_id)
+            if profile and profile.get('state') == 'needs_review' and profile.get('error_code') == 'OCR_REVIEW_REQUIRED':
+                result['resumed_task'] = start_run_all(project_id, RunAllRequest.model_validate(auto.resume_options(project_id, profile)))
+        except ValueError:
+            result['auto_resume_error'] = 'Đã duyệt OCR, nhưng thiết lập Auto đã lưu bị lỗi. Chọn lại giọng/model trong Studio rồi bấm Chạy tự động.'
+    return result
 
 
 @app.post("/api/projects/{project_id}/translate", response_model=TaskResponse)
 def start_translate_endpoint(project_id: str, payload: TranslateBatchRequest = TranslateBatchRequest()):
     """Bắt đầu dịch hàng loạt Gemini với xoay vòng key trong hàng đợi nền."""
     _require_project(project_id)
+    from src.pipeline import auto_workflow as auto
+    with auto.lock:
+        try:
+            profile = auto.read(project_id)
+        except ValueError:
+            profile = None
+        if profile and profile.get('state') in {'failed', 'needs_review'}:
+            options = auto.resume_options(project_id, profile)
+            options['translation_provider'] = payload.provider
+            if payload.model is not None:
+                options['translation_model'] = payload.model
+            repair = payload.model_dump()
+            repair['model'] = payload.model or options.get('translation_model')
+            return _start_auto(project_id, RunAllRequest.model_validate(options), repair)
     task = queue.submit(
         project_id,
         "translate",
@@ -1022,7 +1572,17 @@ def approve_translation_endpoint(project_id: str):
     """Xác nhận bản dịch tiếng Việt hợp lệ -> chuyển sang TRANSLATION_REVIEWED."""
     project_id = _require_editable(project_id)
     state = orchestrator.approve_translation(project_id)
-    return state.model_dump()
+    result = state.model_dump()
+    from src.pipeline import auto_workflow as auto
+    with auto.lock:
+        try:
+            profile = auto.read(project_id)
+            if profile and profile.get('state') in {'failed', 'needs_review'}:
+                result['resumed_task'] = start_run_all(
+                    project_id, RunAllRequest.model_validate(auto.resume_options(project_id, profile)))
+        except ValueError:
+            result['auto_resume_error'] = 'Đã duyệt bản dịch. Chọn lại thiết lập Studio để tiếp tục Auto vì cấu hình lưu trước bị lỗi.'
+    return result
 
 
 @app.get('/api/translation/providers')
@@ -1034,7 +1594,7 @@ def translation_providers():
             local = LocalTranslator().health()
         except Exception:
             local = {'available': False}
-    return {'gemini': {'available': True, 'model': settings.TRANSLATION_MODEL,
+    return {'offline': settings.OFFLINE_MODE, 'gemini': {'available': not settings.OFFLINE_MODE, 'model': settings.TRANSLATION_MODEL,
                       'fallback_models': settings.TRANSLATION_FALLBACK_MODELS.split(','),
                       'repair_model': settings.TRANSLATION_REPAIR_MODEL,
                       'batch_size': settings.TRANSLATION_BATCH_SIZE,
@@ -1077,11 +1637,18 @@ def render_preview_endpoint(
     text_width_percent: Optional[int] = None,
     cover_full_width: Optional[bool] = None,
     cover_effect: Optional[str] = None,
+    corner_logo: Optional[Literal['keep', 'blur', 'remove', 'npzzsub']] = None,
+    brand_position: Optional[Literal['top_left', 'top_right', 'bottom_left', 'bottom_right', 'off']] = None,
     blur_strength: Optional[int] = None,
+    blur_opacity: Optional[float] = None,
+    subtitle_position: Optional[str] = None,
+    subtitle_gap: Optional[int] = None,
+    subtitle_y: Optional[float] = None,
     outline_width: Optional[int] = None,
     outline_color: Optional[str] = None,
     font_color: Optional[str] = None,
     box_padding: Optional[int] = None,
+    platform_preset: Optional[Literal['auto', 'ytb_16_9', 'tiktok_reels_9_16', 'fb_feed']] = None,
 ):
     """Khung hình xem trước đúng pixel bằng chính filter FFmpeg cuối."""
     project_id = validate_identifier(project_id, "Project ID")
@@ -1090,10 +1657,16 @@ def render_preview_endpoint(
                  font_bold=font_bold, font_italic=font_italic, font_shear=font_shear, uppercase=uppercase,
                  text_width_percent=text_width_percent, cover_full_width=cover_full_width,
                  font_scale_x=font_scale_x, prefer_single_line=prefer_single_line,
-                 cover_effect=cover_effect, blur_strength=blur_strength, outline_width=outline_width,
-                 outline_color=outline_color, font_color=font_color, box_padding=box_padding).items() if value is not None}
+                 cover_effect=cover_effect, corner_logo=corner_logo, brand_position=brand_position,
+                 blur_strength=blur_strength, blur_opacity=blur_opacity,
+                 subtitle_position=subtitle_position, subtitle_gap=subtitle_gap, subtitle_y=subtitle_y, outline_width=outline_width,
+                 outline_color=outline_color, font_color=font_color, box_padding=box_padding,
+                 platform_preset=platform_preset).items() if value is not None}
     cfg = RenderConfig.model_validate({**orchestrator.get_subtitle_settings(project_id), **overrides})
     img_bytes = orchestrator.render_preview(project_id, timestamp=t, cfg=cfg)
+    if cfg.style == 'original':
+        return Response(content=img_bytes, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store", "X-Preview-Subtitle-State": "disabled"})
     cues = orchestrator._render_cues(project_id, cfg)
     translated = [cue for cue in cues if (cue.vi_text or '').strip()]
     active = any(cue.start <= t < cue.end for cue in translated)
@@ -1121,6 +1694,74 @@ def start_render_endpoint(project_id: str, payload: RenderOptionsRequest = Rende
     return _task_payload(task)
 
 
+class PublishingPackRequest(BaseModel):
+    force: bool = False
+    target_part_seconds: int = Field(default=180, ge=60, le=900)
+
+
+_publishing_locks = [threading.Lock() for _ in range(32)]
+
+
+def _publishing_inputs(project_id):
+    with SessionLocal() as db:
+        project = db.get(Project, project_id)
+        title = project.title
+    return orchestrator.get_project_dir(project_id), title, orchestrator.get_cues(project_id)
+
+
+def _publishing_timeline(root):
+    from src.pipeline.attempts import artifact_path
+    path = artifact_path(root, 'voiceover/timeline.json')
+    try:
+        rows = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return None
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError('Timeline giọng đọc không đọc được; kiểm tra hoặc tạo lại giọng.') from exc
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError('Timeline giọng đọc phải là danh sách các row JSON.')
+    return rows
+
+
+def _current_publishing_pack(project_id, *, target_part_seconds=180):
+    from src.pipeline.publishing_pack import load_publishing_pack
+    root, title, cues = _publishing_inputs(project_id)
+    try:
+        return load_publishing_pack(project_id, root, title, cues,
+            timeline_rows=_publishing_timeline(root), target_part_seconds=target_part_seconds)
+    except ValueError:
+        return None
+
+
+@app.get('/api/projects/{project_id}/publishing-pack')
+def get_publishing_pack_endpoint(project_id: str, target_part_seconds: int = Query(default=180, ge=60, le=900)):
+    project_id = _require_project(project_id)
+    pack = _current_publishing_pack(project_id, target_part_seconds=target_part_seconds)
+    return {'exists': pack is not None, 'pack': pack}
+
+
+@app.post('/api/projects/{project_id}/publishing-pack')
+def create_publishing_pack_endpoint(project_id: str, payload: PublishingPackRequest = PublishingPackRequest()):
+    project_id = _require_editable(project_id)
+    from src.pipeline.publishing_pack import generate_publishing_pack
+    lock = _publishing_locks[hash(project_id) % len(_publishing_locks)]
+    if not lock.acquire(blocking=False):
+        raise HTTPException(409, 'Đang tạo gói đăng bài. Hãy đợi hoàn tất.')
+    try:
+        root, title, cues = _publishing_inputs(project_id)
+        try:
+            pack = generate_publishing_pack(project_id, root, title, cues, force=payload.force,
+                timeline_rows=_publishing_timeline(root), target_part_seconds=payload.target_part_seconds)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        current = _current_publishing_pack(project_id, target_part_seconds=payload.target_part_seconds)
+        if current is None or current['content_hash'] != pack['content_hash']:
+            raise HTTPException(409, 'Phụ đề đã đổi trong lúc tạo gói. Hãy tạo lại.')
+        return pack
+    finally:
+        lock.release()
+
+
 @app.get("/api/projects/{project_id}/verify")
 def legacy_verify_project_endpoint(project_id: str):
     raise HTTPException(status_code=405, detail='Chạy QA bằng POST; tải lại giao diện để cập nhật.', headers={'Allow': 'POST'})
@@ -1130,12 +1771,28 @@ def legacy_verify_project_endpoint(project_id: str):
 def verify_project_endpoint(project_id: str):
     """Kiểm tra nghiệm thu chất lượng video cuối (độ dài, streams, coverage, drift)."""
     project_id = _require_editable(project_id)
-    report = orchestrator.verify(project_id)
+    from src.jobs.queue import QueuedTask
+    from src.jobs.project_timing import manual_verifications, save_task
+    measurement = QueuedTask('task_' + uuid.uuid4().hex, project_id, None, 'verify',
+                             state='RUNNING', started_at=time.time())
+    if manual_verifications.setdefault(project_id, measurement) is not measurement:
+        raise HTTPException(409, 'Dự án đang chạy nghiệm thu.')
+    save_task(measurement)
+    try:
+        report = orchestrator.verify(project_id)
+        measurement.state = 'DONE' if report.passed else 'FAILED'
+    except BaseException:
+        measurement.state = 'FAILED'
+        raise
+    finally:
+        measurement.finished_at = time.time()
+        save_task(measurement)
+        manual_verifications.pop(project_id, None)
     result = report.to_dict()
     from src.cloud.drive import config as drive_config
-    if report.passed and drive_config().get('auto_upload'):
-        from src.cloud.archive import upload
-        result['cloud_task'] = _task_payload(queue.submit(project_id,'CLOUD_UPLOAD',upload,project_id,inject_cancel=True,update_pipeline_job=False))
+    if not settings.OFFLINE_MODE and report.passed and drive_config().get('auto_upload'):
+        from src.cloud.archive import archive_project
+        result['cloud_task'] = _task_payload(queue.submit(project_id,'CLOUD_UPLOAD',archive_project,project_id,inject_cancel=True,update_pipeline_job=False))
     return result
 
 
@@ -1259,6 +1916,13 @@ def resume_project(project_id:str,payload:ResumeRequest):
 
 
 # --------------------------- WEB UI ---------------------------
+
+@app.get('/workspace-mode.js', include_in_schema=False)
+def workspace_mode():
+    return Response('window.workspacePersonal=' + json.dumps(settings.PERSONAL_MODE) + ';window.workspaceOffline=' + json.dumps(settings.OFFLINE_MODE) + ';' +
+                    ('document.documentElement.classList.add("personal-workspace");' if settings.PERSONAL_MODE else '') +
+                    ('document.documentElement.classList.add("offline-workspace");' if settings.OFFLINE_MODE else ''),
+                    media_type='text/javascript', headers={'Cache-Control': 'no-store'})
 
 class _NoCacheStaticFiles(StaticFiles):
     """Bắt trình duyệt hỏi lại máy chủ mỗi lần tải giao diện.

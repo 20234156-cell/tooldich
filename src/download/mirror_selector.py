@@ -7,6 +7,7 @@ ranking candidate mirrors dynamically while respecting domain health and rate li
 import concurrent.futures
 import logging
 import math
+import re
 import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -63,18 +64,28 @@ def probe_single_mirror(
         (success, ttfb_seconds, throughput_mb_s, status_code)
     """
     probe_headers = dict(headers)
-    probe_headers["Range"] = f"bytes=0-{sample_bytes - 1}"
+    # For the larger Bilibili probe, sample away from the frequently cached prefix.
+    offset = 1024 * 1024 if sample_bytes > 65536 else 0
+    probe_headers["Range"] = f"bytes={offset}-{offset + sample_bytes - 1}"
     probe_headers["Connection"] = "close"
 
     t0 = time.time()
+    dm = None
     try:
         from src.download.manager import DownloadManager
-        resp = DownloadManager()._get(url, probe_headers, timeout=(timeout, timeout))
+        dm = DownloadManager()
+        resp = dm._get(url, probe_headers, timeout=(timeout, timeout))
         status = resp.status_code
-        if status not in (200, 206):
+        if status not in (200, 206) or (offset and status != 206):
             resp.close()
             record_mirror_result(url, False)
             return False, 999.0, 0.0, status
+
+        if offset:
+            content_range = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", resp.headers.get("Content-Range", ""))
+            if not content_range or tuple(map(int, content_range.groups()[:2])) != (offset, offset + sample_bytes - 1):
+                record_mirror_result(url, False)
+                return False, 999.0, 0.0, status
 
         # Measure TTFB
         ttfb = time.time() - t0
@@ -84,7 +95,9 @@ def probe_single_mirror(
             received += len(chunk)
             if received >= sample_bytes:
                 break
-        resp.close()
+        if received == 0 or (offset and received != sample_bytes):
+            record_mirror_result(url, False)
+            return False, ttfb, 0.0, status
         read_duration = max(0.001, time.time() - read_start)
         throughput = (received / (1024 * 1024)) / read_duration  # MB/s
 
@@ -97,6 +110,8 @@ def probe_single_mirror(
     finally:
         if 'resp' in locals():
             resp.close()
+        if dm is not None:
+            dm.close()
 
 
 def select_best_mirrors(
@@ -138,16 +153,19 @@ def select_best_mirrors(
             except Exception:
                 probed_results[u] = (False, 999.0, 0.0)
 
-    def sort_key(url: str) -> float:
+    def sort_key(url: str):
         health = get_mirror_health_score(url)
         if url in probed_results:
             ok, ttfb, speed = probed_results[url]
             if ok:
-                # Combined metric: speed * health / (ttfb + 0.1)
-                return -(speed * health / (ttfb + 0.1))
+                if sample_bytes > 65536:
+                    # Estimate probe transfer time including connection and headers.
+                    sample_mib = sample_bytes / (1024 * 1024)
+                    return (0, ttfb + sample_mib / speed, -health)
+                return (0, -(speed * health / (ttfb + 0.1)), 0)
             else:
-                return 100.0 / health
-        return 50.0 / health
+                return (2, 0, -health)
+        return (1, 0, -health)
 
     ranked = sorted(unique_candidates, key=sort_key)
     return ranked

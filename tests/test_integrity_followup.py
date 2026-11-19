@@ -100,13 +100,17 @@ def test_run_all_returns_committed_output_without_reencoding(tmp_path):
     from src.ocr.base import Cue
     runner=PipelineOrchestrator()
     output=tmp_path/'attempts/current/output/video_vi.mp4';output.parent.mkdir(parents=True);output.write_bytes(b'committed')
+    from src.pipeline.render import RenderConfig, NATURAL_BLUR_PRESET
+    cfg=RenderConfig(audio_mode='original_only', **{k: v for k, v in NATURAL_BLUR_PRESET.items()})
+    (tmp_path/'output').mkdir()
+    (tmp_path/'output/render_config.json').write_text(cfg.model_dump_json())
     state=PipelineState(current_state=ProjectState.VERIFIED)
     report=MagicMock(passed=True);report.to_dict.return_value={'passed':True}
     with patch.object(runner,'get_project_dir',return_value=tmp_path), \
          patch.object(runner,'get_source_video_path',return_value=tmp_path/'source.mp4'), \
          patch.object(runner,'get_roi_set',return_value=ROISet(rois=[ROIBox(x=.1,y=.8,width=.8,height=.1)])), \
          patch.object(runner,'get_state',return_value=state), \
-         patch.object(runner,'get_cues',return_value=[Cue(index=1,start=0,end=1,text='你好',vi_text='Xin chào')]), \
+         patch.object(runner,'get_cues',return_value=[Cue(index=1,start=0,end=1,text='你好',confidence=99,vi_text='Xin chào')]), \
          patch.object(runner,'get_subtitle_settings',return_value={'audio_mode':'original_only'}), \
          patch.object(runner,'save_subtitle_settings'), \
          patch.object(runner,'run_render') as render, \
@@ -159,8 +163,8 @@ def test_selected_translation_api_preserves_integer_scope_and_current_db(server,
     from src.ocr.base import Cue
     api,admin=server
     db_session.add(Project(id='scope'))
-    db_session.add(Transcript(project_id='scope',segments=[{'index':7,'start':0,'end':2,'text':'你好','vi_text':''},
-                                                        {'index':42,'start':3,'end':5,'text':'再见','vi_text':''}]))
+    db_session.add(Transcript(project_id='scope',segments=[{'index':7,'start':0,'end':2,'text':'你好','confidence':99,'vi_text':''},
+                                                        {'index':42,'start':3,'end':5,'text':'再见','confidence':99,'vi_text':''}]))
     db_session.commit()
     api.orchestrator.save_state('scope',PipelineState(current_state=ProjectState.SOURCE_REVIEWED))
     queue=JobQueue(1)
@@ -213,8 +217,8 @@ def test_failed_dash_validation_preserves_previous_delivery(tmp_path):
     target=tmp_path/'video.mp4';target.write_bytes(b'previous verified delivery')
     manager=DownloadManager()
     media=MediaSource(success=True,platform='bilibili',video_url='https://test.bilivideo.com/v',audio_url='https://test.bilivideo.com/a')
-    def mux(video,audio,path):path.write_bytes(b'invalid new mux');return path
-    with patch('src.download.manager.select_best_mirrors',side_effect=lambda urls,headers:urls), \
+    def mux(video,audio,path,*args,**kwargs):path.write_bytes(b'invalid new mux');return path
+    with patch('src.download.manager.select_best_mirrors',side_effect=lambda urls,headers,**kwargs:urls), \
          patch.object(manager,'_probe_url',side_effect=lambda url,headers:(True,8,url)), \
          patch('src.download.manager.AdaptiveRangeDownloader.download_range',return_value=True), \
          patch('src.download.manager.mux_video_audio_copy',side_effect=mux), \

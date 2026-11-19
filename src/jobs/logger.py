@@ -48,6 +48,7 @@ def mask_secrets(text: str) -> str:
 
 class SystemErrorCodes:
     TIMING_REVIEW_REQUIRED = "TIMING_REVIEW_REQUIRED"
+    QA_REVIEW_REQUIRED = "QA_REVIEW_REQUIRED"
     INVALID_URL = "INVALID_URL"
     UNSUPPORTED_PLATFORM = "UNSUPPORTED_PLATFORM"
     SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
@@ -78,6 +79,7 @@ class SystemErrorCodes:
     FRAME_EXTRACTION_FAILED = "FRAME_EXTRACTION_FAILED"
     OCR_UNAVAILABLE = "OCR_UNAVAILABLE"
     TRANSCRIPT_NOT_FOUND = "TRANSCRIPT_NOT_FOUND"
+    OCR_REVIEW_REQUIRED = "OCR_REVIEW_REQUIRED"
     SCENES_NOT_FOUND = "SCENES_NOT_FOUND"
     SCRIPT_NOT_FOUND = "SCRIPT_NOT_FOUND"
     INVALID_SCRIPT_MODE = "INVALID_SCRIPT_MODE"
@@ -106,6 +108,17 @@ class PipelineException(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def is_api_limit_error(code: str, message: str = '') -> bool:
+    if code == SystemErrorCodes.RATE_LIMIT_EXCEEDED:
+        return True
+    if code not in {SystemErrorCodes.AI_ERROR, SystemErrorCodes.TRANSLATION_ERROR}:
+        return False
+    text = message.casefold()
+    return bool(re.search(r'^429\b|\b(?:http|code|status)\W+429\b', text)) or any(
+        marker in text for marker in ('resource_exhausted', 'quota exceeded', 'rate limit', 'hết hạn ngạch')
+    )
 
 
 class TaskCancelled(Exception):

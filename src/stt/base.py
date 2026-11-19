@@ -5,6 +5,13 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 
 
+class TranscriptWord(BaseModel):
+    start: float
+    end: float
+    word: str
+    probability: float
+
+
 class TranscriptSegment(BaseModel):
     """Một phân đoạn lời thoại theo timestamp (schema API.md mục 1.4)."""
 
@@ -13,6 +20,9 @@ class TranscriptSegment(BaseModel):
     original: str
     translated: Optional[str] = None
     translation_failed: bool = False
+    avg_logprob: Optional[float] = None
+    no_speech_prob: Optional[float] = None
+    words: List[TranscriptWord] = Field(default_factory=list)
 
 
 class TranscriptResult(BaseModel):

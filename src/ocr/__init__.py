@@ -4,7 +4,7 @@ from src.ocr.base import Cue, cues_to_srt, format_srt_timestamp
 from src.ocr.rapidocr_engine import RapidOCREngine
 from src.ocr.cue_detector import CueDetector
 from src.ocr.vsf_adapter import VideoSubFinderAdapter
-from src.ocr.deduplicate import deduplicate_cues, text_similarity
+from src.ocr.deduplicate import coalesce_short_cues, deduplicate_cues, text_similarity
 
 __all__ = [
     "Cue",
@@ -13,6 +13,7 @@ __all__ = [
     "RapidOCREngine",
     "CueDetector",
     "VideoSubFinderAdapter",
+    "coalesce_short_cues",
     "deduplicate_cues",
     "text_similarity",
 ]

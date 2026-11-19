@@ -83,6 +83,7 @@ class KeyInfo:
     last_error: Optional[str] = None
     model_cooldowns: Dict[str, float] = field(default_factory=dict)
     project_id: Optional[str] = None
+    model_block_reasons: Dict[str, str] = field(default_factory=dict)
 
     @property
     def masked(self) -> str:
@@ -172,6 +173,7 @@ class GeminiKeyPool:
                                 cooldown_until=float(item.get("cooldown_until", 0)),
                                 model_cooldowns={m:float(until) for m,until in item.get('model_cooldowns',{}).items()},
                                 project_id=item.get('project_id') or None,
+                                model_block_reasons=item.get('model_block_reasons', {}),
                             )
                         )
         except Exception as e:
@@ -181,7 +183,8 @@ class GeminiKeyPool:
         """Encrypt and save keys to disk atomically."""
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         items = [{"key": k.key, "status": k.status, "failure_count": k.failure_count, "cooldown_until": k.cooldown_until,
-                  'model_cooldowns':k.model_cooldowns,'project_id':k.project_id} for k in self._keys]
+                  'model_cooldowns':k.model_cooldowns,'project_id':k.project_id,
+                  'model_block_reasons':k.model_block_reasons} for k in self._keys]
         data = json.dumps(items).encode("utf-8")
         enc = _dpapi_encrypt(data)
 
@@ -228,9 +231,12 @@ class GeminiKeyPool:
             blocks = {}
             for peer in peers:
                 for model, until in peer.model_cooldowns.items():
-                    blocks[model] = max(blocks.get(model, 0), until)
+                    if model not in blocks or until > blocks[model][0]:
+                        blocks[model] = until, peer.model_block_reasons.get(model, 'unknown')
             for peer in peers:
-                peer.model_cooldowns.update(blocks)
+                for model, (until, reason) in blocks.items():
+                    peer.model_cooldowns[model] = until
+                    peer.model_block_reasons[model] = reason
             self.save_keys()
             return True
 
@@ -252,6 +258,8 @@ class GeminiKeyPool:
                     "last_error": k.last_error,
                     "cooldown_remaining_s": max(0, int(k.cooldown_until - now)) if k.status in {"cooldown", "exhausted"} else 0,
                     'model_cooldowns': {model:max(0,int(until-now)) for model,until in k.model_cooldowns.items() if until>now},
+                    'model_block_reasons': {model:k.model_block_reasons.get(model, 'unknown')
+                                            for model,until in k.model_cooldowns.items() if until>now},
                 })
             return res
 
@@ -291,6 +299,7 @@ class GeminiKeyPool:
                         k.last_error = None
                     if model and time.time()>=k.model_cooldowns.get(model,0):
                         k.model_cooldowns.pop(model,None)
+                        k.model_block_reasons.pop(model,None)
                     break
             self.save_keys()
 
@@ -316,11 +325,14 @@ class GeminiKeyPool:
                         if retry_after is not None:
                             cooldown = max(cooldown, retry_after)
                         if model:
-                            k.model_cooldowns[model] = time.time()+cooldown
-                            if k.project_id:
-                                for peer in self._keys:
-                                    if peer.project_id == k.project_id:
-                                        peer.model_cooldowns[model] = max(peer.model_cooldowns.get(model, 0), k.model_cooldowns[model])
+                            detail = error_msg.lower()
+                            daily = any(marker in detail for marker in ('perday', 'per_day', 'daily quota', 'per day'))
+                            until = time.time()+cooldown
+                            for peer in self._keys:
+                                if (peer is k or (k.project_id and peer.project_id == k.project_id)
+                                        ) and until > peer.model_cooldowns.get(model, 0):
+                                    peer.model_cooldowns[model] = until
+                                    peer.model_block_reasons[model] = 'daily_quota' if daily else 'rate_limit'
                         else:
                             k.status = "exhausted" if cooldown >= 3600 else "cooldown"
                             k.cooldown_until = time.time() + cooldown
@@ -329,7 +341,9 @@ class GeminiKeyPool:
                         until = time.time() + (3600 if error_status == 404 else 15)
                         for peer in self._keys:
                             if peer is k or (k.project_id and peer.project_id == k.project_id):
-                                peer.model_cooldowns[model] = max(peer.model_cooldowns.get(model, 0), until)
+                                if until > peer.model_cooldowns.get(model, 0):
+                                    peer.model_cooldowns[model] = until
+                                    peer.model_block_reasons[model] = 'unavailable' if error_status == 404 else 'temporary'
                     else:
                         k.status = "cooldown"
                         k.cooldown_until = time.time() + 15

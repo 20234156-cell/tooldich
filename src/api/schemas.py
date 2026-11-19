@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, AliasChoices, ConfigDict
+from src.pipeline.roi import ManualMask
 
 
 class ErrorResponse(BaseModel):
@@ -10,6 +11,7 @@ class ErrorResponse(BaseModel):
 
 class CreateProjectRequest(BaseModel):
     url: str = Field(..., description="URL video Douyin/Bilibili/TikTok hoặc đường dẫn file cục bộ")
+    auto_start: bool = False
     trim_start: Optional[str] = Field(
         default=None, description="Mốc bắt đầu, ví dụ 300 hoặc 5:00. Trống = từ đầu video"
     )
@@ -43,6 +45,9 @@ class ProjectListItem(BaseModel):
     progress: int = 0
     error_code: Optional[str] = None
     eta: Optional[Dict[str, Any]] = None
+    timing: Optional[Dict[str, Any]] = None
+    active_task: Optional[Dict[str, Any]] = None
+    ocr_review_remaining: Optional[int] = None
 
 
 class VoiceTimingOptions(BaseModel):
@@ -56,12 +61,30 @@ class VoiceTimingOptions(BaseModel):
 
 class RunAllRequest(VoiceTimingOptions):
     """Tuỳ chọn cho việc chạy liên tiếp toàn bộ pipeline."""
+    skip_uncertain: Optional[bool] = None
+    subtitle_preset: Optional[Literal['natural_blur']] = None
+    corner_logo: Optional[Literal['keep', 'blur', 'remove', 'npzzsub']] = None
+    manual_blur: Optional[List[ManualMask]] = Field(default=None, max_length=8)
+    brand_position: Optional[Literal['top_left', 'top_right', 'bottom_left', 'bottom_right', 'off']] = None
+    platform_preset: Optional[Literal['auto', 'ytb_16_9', 'tiktok_reels_9_16', 'fb_feed']] = None
+    target_part_seconds: Optional[int] = Field(default=None, ge=60, le=900)
+    clean_secondary_captions: Optional[bool] = None
+    workflow_mode: Literal['custom', 'screen_subtitles', 'speech_subtitles', 'screen_dub', 'screen_voice_only', 'speech_dub', 'hybrid_dub'] = 'custom'
+    processing_profile: Optional[Literal['fast', 'balanced', 'quality', 'compact']] = None
     voice: Optional[str] = None
-    subtitle_style: Optional[str] = None  # omitted: preserve saved style
-    extraction_mode: Literal["hardsub", "auto", "stt"] = "hardsub"
+    subtitle_style: Optional[str] = Field(default=None, validation_alias=AliasChoices('subtitle_style', 'style'))
+    extraction_mode: Literal["hardsub", "auto", "stt"] = "auto"
     translation_provider: Literal["gemini", "local_hymt"] = "gemini"
     translation_model: Optional[str] = None
-    translation_batch_size: Optional[int] = Field(default=None,ge=1,le=150)
+    translation_batch_size: Optional[int] = Field(default=None, ge=1, le=150)
+    audio_mode: Optional[Literal["mix", "voice_only", "original_only"]] = None
+    voice_volume: Optional[float] = None
+    bg_volume: Optional[float] = None
+    font_family: Optional[str] = None
+    font_color: Optional[str] = None
+    outline_color: Optional[str] = None
+    outline_width: Optional[int] = None
+    font_size: Optional[int] = None
 
 
 class ExtractionRequest(BaseModel):
@@ -145,7 +168,11 @@ class TranslateBatchRequest(BaseModel):
 
 
 class RenderOptionsRequest(BaseModel):
-    style: str = Field(default="cover", description="cover | clean | bilingual")
+    compact_caption_blur: bool = False
+    manual_blur: List[ManualMask] = Field(default_factory=list, max_length=8)
+    brand_position: Literal['top_left', 'top_right', 'bottom_left', 'bottom_right', 'off'] = 'off'
+    corner_logo: Literal['keep', 'blur', 'remove', 'npzzsub'] = 'keep'
+    style: str = Field(default="cover", description="cover | clean | bilingual | original")
     font_family: Optional[str] = Field(default='Arial', validation_alias=AliasChoices('font_family', 'font_name'))
     font_size: Optional[int] = 48
     font_color: Optional[str] = "&H00FFFFFF"
@@ -161,6 +188,10 @@ class RenderOptionsRequest(BaseModel):
     cover_full_width: bool = False
     cover_effect: Literal['solid', 'blur'] = 'solid'
     blur_strength: int = Field(default=24, ge=1, le=100)
+    blur_opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    subtitle_position: Literal['inside', 'above', 'below', 'bottom', 'custom'] = 'inside'
+    subtitle_gap: int = Field(default=8, ge=0, le=200)
+    subtitle_y: float = Field(default=.9, ge=0.0, le=1.0)
     box_color: Optional[str] = "black"
     box_opacity: float = Field(default=1.0, ge=0.0, le=1.0)
     box_padding: Optional[int] = 6
@@ -168,8 +199,17 @@ class RenderOptionsRequest(BaseModel):
     preset: str = Field(default='p4', validation_alias=AliasChoices('preset', 'encoder_preset'))
     voice_volume: Optional[float] = 1.7
     bg_volume: Optional[float] = 0.15
+    bg_gap_ceiling: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    vocal_band_ducking: Optional[bool] = None
+    bgm_path: Optional[str] = None
+    bgm_volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    ai_stem_separation: Optional[bool] = None
     audio_mode: Literal['mix', 'voice_only', 'original_only'] = 'mix'
     use_nvenc: bool = True
+    platform_preset: Optional[Literal['auto', 'ytb_16_9', 'tiktok_reels_9_16', 'fb_feed']] = None
+    target_part_seconds: Optional[int] = Field(default=None, ge=60, le=900)
+    clean_secondary_captions: Optional[bool] = None
+    restore_captions: Optional[bool] = None
 
     def to_render_config(self):
         from src.pipeline.render import RenderConfig

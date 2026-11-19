@@ -57,4 +57,12 @@ Thumbs.db
 Desktop.ini
 
 config/local_translation.key
-tools/llama-cuda124-*/
+tools/
+tests/fixtures/*.mp4
+tests/fixtures/*.wav
+test_alphamerge_no_t.mp4
+temp/
+.commandcode/
+/learning/evidence/
+/learning/.journal.lock
+/learning/corrections.jsonl

@@ -4,7 +4,7 @@ import re
 
 from config.settings import settings
 
-TIMELINE_VERSION = 'timeline-v7-bounded'
+TIMELINE_VERSION = 'timeline-v9-cluster-budget'
 
 
 def rate_multiplier(rate):

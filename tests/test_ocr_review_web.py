@@ -7,6 +7,28 @@ import subprocess
 import pytest
 
 
+def test_review_status_uses_current_records_and_does_not_apply_ocr_score_to_stt():
+    node=shutil.which('node')
+    if not node:pytest.skip('Node required')
+    source=(Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
+    block=source[source.index('function ocrNeedsReview('):source.index('function ocrReviewEntries(')]
+    script=block+'''
+if(ocrNeedsReview({source_kind:'stt',confidence:0,text:'speech'}))throw Error('STT treated as OCR');
+if(!ocrNeedsReview({source_kind:'ocr',confidence:99,text:'原创@频道'}))throw Error('credit treated as dialogue');
+if(ocrNeedsReview({source_kind:'stt',confidence:99,text:'原创@频道'}))throw Error('credit heuristic applied to speech');
+if(ocrNeedsReview({source_kind:'ocr',confidence:99,text:'这是原创作品'}))throw Error('ordinary dialogue flagged');
+const project={job:{error_code:'OCR_REVIEW_REQUIRED'},transcript:{segments:[]}};
+if(ocrReviewResolved(project))throw Error('empty transcript approved');
+project.transcript.segments=[{confidence:50,text:'uncertain'}];
+if(ocrReviewResolved(project))throw Error('pending caption hidden');
+project.transcript.segments[0].corrected_text='verified';
+if(!ocrReviewResolved(project))throw Error('old error presented as unresolved');
+project.job.error_code='NETWORK_ERROR';
+if(ocrReviewResolved(project))throw Error('unrelated failure hidden');
+'''
+    subprocess.run([node,'-e',script],capture_output=True,text=True,encoding='utf-8',timeout=10,check=True)
+
+
 def test_cancelled_ocr_refreshes_authoritative_state_after_worker_stops():
     node = shutil.which('node')
     if not node:
@@ -135,3 +157,49 @@ confirmOcrCue(203,'不',button).then(()=>console.log(JSON.stringify({calls,disab
         assert len(data['calls']) == 2 and 'DB write failed' in data['calls'][1]
     else:
         assert data['calls'][1:] == ['toast', 'reload', 'refresh']
+
+
+@pytest.mark.parametrize('mode', ['switch', 'overlap', 'failure', 'editing'])
+def test_cue_load_does_not_publish_stale_or_unread_records(mode):
+    node=shutil.which('node')
+    if not node:pytest.skip('Node required')
+    source=(Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
+    block=source[source.index('async function loadCues('):source.index('const cuePages =')]
+    script=r'''
+const assert=require('node:assert/strict'),pending=[],rendered=[];
+let currentProjectId='a',currentCues=[{index:5,text:'old'}],cueLoadGeneration=0;
+const API={getCues:()=>new Promise((resolve,reject)=>pending.push({resolve,reject}))};
+const DOM={detailError:{textContent:''},cuesList:{contains:()=>true}};
+const document={activeElement:MODE==='editing'?{matches:()=>true}:null};
+const renderCuesTable=()=>rendered.push('ocr'),renderTransTable=()=>{},renderVoiceTable=()=>{},loadVoiceTiming=()=>{};
+'''.replace('MODE',json.dumps(mode))+block+r'''
+(async()=>{
+ const first=loadCues();
+ if(MODE==='switch'){currentProjectId='b';pending[0].resolve([{index:9,text:'wrong project'}]);assert.equal(await first,false);}
+ if(MODE==='failure'){pending[0].reject(Error('DB unavailable'));assert.equal(await first,false);assert.match(DOM.detailError.textContent,/DB unavailable/);}
+ if(MODE==='editing'){pending[0].resolve([{index:9,text:'server update'}]);assert.equal(await first,false);}
+ if(MODE==='overlap'){
+  const second=loadCues();pending[1].resolve([{index:203,text:'latest'}]);assert.equal(await second,true);
+  pending[0].resolve([{index:9,text:'stale'}]);assert.equal(await first,false);
+  assert.equal(currentCues[0].index,203);assert.equal(rendered.length,1);return;
+ }
+ assert.equal(currentCues[0].index,5);assert.equal(rendered.length,0);
+})().catch(e=>{console.error(e);process.exitCode=1;});
+'''.replace('MODE',json.dumps(mode))
+    subprocess.run([node,'-e',script],check=True,capture_output=True,text=True,encoding='utf-8',timeout=10)
+
+
+def test_failed_authoritative_reload_does_not_submit_source_approval():
+    node=shutil.which('node')
+    if not node:pytest.skip('Node required')
+    source=(Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
+    start=source.index('DOM.btnApproveOcr.addEventListener(')
+    block=source[start:source.index('// =============================================================================',start)]
+    script='''
+let handler;const currentProjectId='p',currentCues=[],calls=[];
+const DOM={btnApproveOcr:{addEventListener:(event,fn)=>handler=fn}};
+const loadCues=async()=>false,API={approveCues:async()=>calls.push('approve')};
+'''+block+'''
+handler().then(()=>{if(calls.length)throw Error('approved stale data');}).catch(e=>{console.error(e);process.exitCode=1;});
+'''
+    subprocess.run([node,'-e',script],check=True,capture_output=True,text=True,encoding='utf-8',timeout=10)

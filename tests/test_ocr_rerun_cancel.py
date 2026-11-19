@@ -108,3 +108,40 @@ def test_successful_rerun_publishes_unique_evidence_and_invalidates_translation(
     assert (root/'transcript/cues/old.png').read_bytes()==b'old evidence'
     assert runner.get_state('rerun').current_state==ProjectState.OCR_READY
     assert runner.get_state('rerun').get_stage('TRANSLATED').status=='STALE'
+
+
+@pytest.mark.parametrize('db_failure', [False, True])
+def test_source_recheck_report_keeps_rejected_image_and_db_remains_authoritative(rerun, monkeypatch, db_failure):
+    import json
+    runner, root = rerun
+    state = PipelineState(current_state=ProjectState.OCR_READY)
+    state.set_stage_status('OCR_READY','COMPLETED')
+    runner.save_state('rerun',state)
+    def extract(self, **kw):
+        folder = kw['output_dir']/'cues'
+        folder.mkdir()
+        (folder/'uncertain.png').write_bytes(b'rejected image')
+        return [Cue(index=7,start=3,end=4,text='uncertain',confidence=52,image_path='cues/uncertain.png')]
+    def recheck(video,roi,cues,directory,engine,**kw):
+        (directory/'cues/recovered.png').write_bytes(b'new image')
+        report={'resolved':1,'discarded':0,'unchecked_pending_cue_ids':[],
+                'decisions':[{'original':cues[0].model_dump(), 'image_path':'cues/recovered.png'}]}
+        (directory/'source_recheck.json').write_text(json.dumps(report),encoding='utf-8')
+        return [Cue(index=7,start=3,end=4,text='新的',confidence=96,image_path='cues/recovered.png')],report
+    monkeypatch.setattr('src.pipeline.orchestrator.VideoSubFinderAdapter.extract_cues',extract)
+    monkeypatch.setattr('src.ocr.source_recheck.recheck_uncertain_cues',recheck)
+    if db_failure:
+        monkeypatch.setattr(runner,'save_cues',lambda *a: (_ for _ in ()).throw(RuntimeError('DB failed')))
+        with pytest.raises(RuntimeError,match='DB failed'): runner.run_ocr('rerun')
+        assert runner.get_cues('rerun')[0].index == 42
+        assert not list((root/'transcript').glob('source_recheck_*.json'))
+        assert [p.name for p in (root/'transcript/cues').iterdir()] == ['old.png']
+    else:
+        runner.run_ocr('rerun')
+        state = runner.get_state('rerun')
+        report = json.loads((root/state.get_stage('OCR_READY').artifacts['source_recheck']).read_text(encoding='utf-8'))
+        decision=report['decisions'][0]
+        assert (root/'transcript'/decision['original']['image_path']).read_bytes() == b'rejected image'
+        assert (root/'transcript'/decision['image_path']).read_bytes() == b'new image'
+        assert runner.get_cues('rerun')[0].text == '新的'
+    assert not list(root.glob('ocr_rerun_*'))

@@ -38,3 +38,47 @@ restoreWorkspace().then(()=>console.log(JSON.stringify({calls,error:DOM.detailEr
     else:
         assert d['calls']==['new' if mode=='new' else 'dashboard']
     assert 'restoreWorkspace();' in source
+
+
+def test_studio_open_routes_fresh_project_state_and_active_render():
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node required')
+    source = (Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
+    functions = source[source.index('async function openProject('):source.index('function startPolling(')]
+    functions += source[source.index('function stageToStepNumber('):source.index('function subtitleConfigured(')]
+    functions += source[source.index('const NEXT_ACTIONS'):source.index('function updateNextAction(')]
+    harness = """
+let currentProjectId, currentProject, ocrReviewFilter, currentROI, currentCues, currentWorkflow, lastHydratedStage;
+const cuePages = {}, DOM = {detailVideo:{dataset:{}, style:{}}, detailTitle:{}, detailError:{},
+  detailBar:{style:{}}, previewEmpty:{style:{}}, roiCanvas:{style:{}}};
+const window = {dispatchEvent(){}};
+const CustomEvent = function(){};
+const showView = () => {};
+const stopPolling = () => {};
+const startPolling = () => {};
+const loadSubtitleSettings = async () => {};
+const updateWorkflowUI = () => {};
+const switchStudioTab = tab => tabs.push(tab);
+const tabs = [];
+const projects = {done:{stage:'VERIFIED'}, voice:{stage:'VOICE_READY'}, ocr:{stage:'OCR_READY'},
+  rendering:{stage:'TRANSLATION_REVIEWED', task:{state:'RUNNING',action:'render'}}};
+const subtitleConfigured = () => true;
+const ocrNeedsReview = cue => cue.pending;
+const renderCuesTable = () => tabs.push(ocrReviewFilter);
+const document = {getElementById:() => ({value:'original_only'})};
+const refreshProjectData = async () => {
+  currentProject = projects[currentProjectId];
+  currentCues = [{pending: currentProjectId === 'ocr'}];
+};
+"""
+    run = """
+(async () => {
+  for (const id of Object.keys(projects)) await openProject(id);
+  console.log(JSON.stringify(tabs));
+})().catch(e => { console.error(e); process.exitCode = 1; });
+"""
+    result = subprocess.run([node, '-e', harness+functions+run], check=True, capture_output=True,
+                            text=True, encoding='utf-8', timeout=10)
+    assert json.loads(result.stdout) == ['workflow', 'verify', 'workflow', 'render',
+                                         'workflow', 'ocr', 'pending', 'workflow', 'render']

@@ -1,0 +1,3 @@
+# Install only in tools/ocr-gpu (venv with --system-site-packages).
+# CUDA/cuDNN DLLs come from the validated tools/vieneu-gpu runtime.
+onnxruntime-gpu==1.22.0

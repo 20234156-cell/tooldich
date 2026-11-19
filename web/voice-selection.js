@@ -36,7 +36,8 @@
   function restore() {
     stopSample();
     const saved = (currentProjectId && read(currentProjectId)) || read('default');
-    if (saved?.voice) {
+    const defaultVoice = window.defaultVoice || document.getElementById('auto-voice')?.value || 'piper:ngochuyen';
+    if (saved?.voice && (!window.workspaceOffline || saved.voice.startsWith('vieneu:') || saved.voice.startsWith('piper:'))) {
       if (![...pick.options].some(o => o.value === saved.voice)) {
         const option = document.createElement('option');
         option.value = saved.voice;
@@ -52,8 +53,10 @@
       const color = document.getElementById('voice-color');
       if ([...color.options].some(o => o.value === saved.color)) color.value = saved.color;
     } else {
-      pick.value = 'vi-VN-NamMinhNeural';
-      document.getElementById('voice-rate').value = '0';
+      pick.value = window.workspaceOffline ? 'vieneu:ngoc_huyen_review_phim' : defaultVoice;
+      const defaultRate = document.getElementById('auto-speed')?.value;
+      const n = defaultRate ? Number.parseInt(defaultRate, 10) : 0;
+      document.getElementById('voice-rate').value = Number.isFinite(n) ? String(n) : '0';
       document.getElementById('voice-rate').dispatchEvent(new Event('input'));
       document.getElementById('voice-color').value = 'default';
     }
@@ -70,8 +73,23 @@
     const generation=++selectionGeneration;
     restore();
     const project = currentProjectId;
-    if (!window.workspaceServerEnabled || !project) return;
+    if (!project) return;
     try {
+      // Đồng bộ thiết lập giọng từ auto-workflow nếu dự án được tạo qua Auto
+      if (!read(project)) {
+        const autoInfo = await fetch('/api/projects/' + encodeURIComponent(project) + '/auto-workflow')
+          .then(r => r.ok ? r.json() : null).catch(() => null);
+        if (autoInfo?.options?.voice && !read(project)) {
+          const speedNum = Number.parseInt(autoInfo.options.rate || '0', 10);
+          write(project, {
+            voice: autoInfo.options.voice,
+            rate: Number.isFinite(speedNum) ? speedNum : 0,
+            color: 'default'
+          });
+          restore();
+        }
+      }
+      if (!window.workspaceServerEnabled) return;
       const [own, defaults] = await Promise.all([fetch('/api/server/preferences/'+encodeURIComponent(project)),fetch('/api/server/preferences/default')]);
       if (!own.ok || !defaults.ok) throw Error('Không đọc được lựa chọn giọng trên server.');
       const values = await Promise.all([own.json(),defaults.json()]);

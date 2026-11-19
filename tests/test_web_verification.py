@@ -12,7 +12,7 @@ def test_project_without_task_clears_previous_activity():
     if not node:
         pytest.skip('Node required')
     source = (Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
-    block = source[source.index('  if (project.task) renderTaskActivity'):source.index('  const progress = activeTask')]
+    block = source[source.index('  if (project.task) {'):source.index('  const progress = activeTask')]
     script = '''
 const project={task:null};
 const DOM={taskActivity:{hidden:false,dataset:{state:'FAILED'}}};
@@ -45,9 +45,9 @@ def test_active_retry_does_not_show_previous_job_error(active,error):
     if not node:pytest.skip('Node required')
     source=(Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
     block=source[source.index('  const jobError ='):source.index('  if (errorMessage)')]
-    script='const project={job:{status:"FAILED",error_message:"previous failure"}};const activeTask='+('{}' if active else 'null')+';'+block+'console.log(JSON.stringify(errorMessage));'
+    script='const project={job:{status:"FAILED",error_message:"previous failure",error_code:"previous_code"}};const activeTask='+('{}' if active else 'null')+';'+block+'console.log(JSON.stringify({message:errorMessage,code:errorCode}));'
     result=subprocess.run([node,'-e',script],capture_output=True,text=True,encoding='utf-8',check=True,timeout=10)
-    assert json.loads(result.stdout)==error
+    assert json.loads(result.stdout)==({'message':error} if active else {'message':error,'code':'previous_code'})
 
 
 def test_tts_activity_syncs_description_and_hides_unreliable_eta():
@@ -70,6 +70,26 @@ if(DOM.taskActivityStage.textContent!=='Valid 36/125')throw Error('cross-project
 if(receivedEvents.length!==1||receivedEvents[0].project_id!=='active')throw Error('cross-project recovery controls');
 '''
     subprocess.run([node,'-e',script],capture_output=True,text=True,encoding='utf-8',check=True,timeout=10)
+
+
+@pytest.mark.parametrize('code', ['OCR_REVIEW_REQUIRED', 'TRANSCRIPT_NOT_FOUND'])
+def test_ambiguous_ocr_shows_review_instead_of_technical_failure(code):
+    node = shutil.which('node')
+    if not node: pytest.skip('Node required')
+    source = (Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
+    function = source[source.index('function renderTaskActivity(task)'):source.index('async function waitForTask')]
+    script = '''
+const currentProjectId='active';
+const window={dispatchEvent(){}};const CustomEvent=function(){};
+const DOM=new Proxy({}, {get:(obj,key)=>obj[key] ||= {style:{},dataset:{}}});
+const TASK_ACTION_LABELS={};
+const formatClock=String,formatSpan=String,escapeHtml=String;
+''' + function + '\nrenderTaskActivity(' + json.dumps(dict(project_id='active', state='FAILED', error_code=code, error_details={'cue_indices':[105]})) + ''');
+if(DOM.taskActivityState.textContent!=='CẦN DUYỆT OCR')throw Error('wrong review label');
+if(DOM.taskActivityState.className!=='task-state review')throw Error('wrong review styling');
+if(DOM.taskFinishAt.textContent!=='Chờ duyệt OCR')throw Error('misleading completion time');
+'''
+    subprocess.run([node,'-e',script], capture_output=True,text=True,encoding='utf-8',check=True,timeout=10)
 
 
 def test_navigation_resumes_studio_monitoring_without_submitting_or_cancelling_jobs():
@@ -123,14 +143,16 @@ const API = {request:async()=>{throw new Error('Not Found');}};
     assert data['loading'] is False
 
 
-def scorecard(report):
+def scorecard(report, *, content_review=False):
     node = shutil.which('node')
     if not node:
         pytest.skip('Node is required to execute the browser scorecard contract')
     source = (Path(__file__).resolve().parents[1]/'web/app.js').read_text(encoding='utf-8')
     function = source[source.index('function renderVerifyScorecard('):source.index('function updateDownloadLinks(')]
-    script = ("const DOM = Object.fromEntries(['qaMetricDuration','qaMetricDrift','qaMetricCoverage','qaMetricDegraded'].map(k=>[k,{}]));\n"
-              +function+'\nrenderVerifyScorecard('+json.dumps(report)+');\nconsole.log(JSON.stringify(DOM));')
+    script = "const DOM = Object.fromEntries(['qaMetricDuration','qaMetricDrift','qaMetricCoverage','qaMetricDegraded'].map(k=>[k,{}]));\n"
+    if content_review:
+        script += "const nodes = {summary:{},pre:{}}; DOM.qaContentReview = {nodes, querySelector: key => nodes[key]};\n"
+    script += function+'\nrenderVerifyScorecard('+json.dumps(report)+');\nconsole.log(JSON.stringify(DOM));'
     result = subprocess.run([node, '-e', script], capture_output=True, text=True,
                             encoding='utf-8', check=True, timeout=10)
     return json.loads(result.stdout)
@@ -141,6 +163,20 @@ def test_missing_report_cannot_display_successful_metrics():
     assert all(item['className'] != 'qa-pass' for item in result.values())
 
 
+def test_content_review_lists_cue_id_reason_and_timestamp():
+    result = scorecard({'degraded': ['content_review:voice_outside_caption'], 'content_review_items': [
+        {'cue_id': 1401, 'start': 3856.5, 'end': 3858, 'reason': 'voice_outside_caption',
+         'actual_start': 3855.396, 'actual_end': 3858.076},
+    ]}, content_review=True)
+    assert result['qaMetricDegraded']['textContent'] == 'Cần duyệt nội dung'
+    detail = result['qaContentReview']
+    assert not detail['hidden']
+    assert detail['nodes']['summary']['textContent'] == '1 câu cần duyệt'
+    assert '01:04:16.500' in detail['nodes']['pre']['textContent']
+    assert 'Câu 1401' in detail['nodes']['pre']['textContent']
+    assert '01:04:15.396' in detail['nodes']['pre']['textContent']
+
+
 @pytest.mark.parametrize('total,voiced,translated,reported_percent', [
     (100, 95, 100, 95), (3929, 3928, 3929, 100), (100, 100, 99, 100),
 ])
@@ -148,6 +184,21 @@ def test_scorecard_requires_exact_voice_and_translation_coverage(total, voiced, 
     result = scorecard({'total_cues': total, 'voiced_cues': voiced,
                         'translated_cues': translated, 'coverage_pct': reported_percent})
     assert result['qaMetricCoverage']['className'] != 'qa-pass'
+
+
+def test_scorecard_discloses_subtitle_only_caption_without_marking_missing_voice():
+    result=scorecard({'total_cues':87,'translated_cues':87,'voiced_cues':86,
+                     'voice_eligible_cues':86,'subtitle_only_cue_ids':[88]})
+    assert result['qaMetricCoverage']['className']=='qa-pass'
+    assert 'Giọng 86/86' in result['qaMetricCoverage']['textContent']
+    assert '1 chú thích chỉ hiện phụ đề' in result['qaMetricCoverage']['textContent']
+
+
+@pytest.mark.parametrize('eligible,ids,voiced',[(86,[],86),(86,[88,88],86),(-1,[],0),(86,[88],85)])
+def test_scorecard_cannot_hide_missing_voice_with_inconsistent_role_counts(eligible,ids,voiced):
+    result=scorecard({'total_cues':87,'translated_cues':87,'voiced_cues':voiced,
+                     'voice_eligible_cues':eligible,'subtitle_only_cue_ids':ids})
+    assert result['qaMetricCoverage']['className']!='qa-pass'
 
 
 def test_scorecard_checks_mean_drift_even_without_explicit_boolean():
@@ -179,11 +230,12 @@ def test_actual_ui_forwards_selected_batch_size(batch_size, entry):
         function = source[start:stop]
         invoke = 'await handler();'
     setup = ("let handler, sent; const currentProjectId='project'; const document={getElementById:id=>({value:id==='translation-batch-size'?"
-             + str(batch_size) + ":id==='translation-provider'?'gemini':'hardsub'})};"
+             + str(batch_size) + ":id==='translation-provider'?'gemini':id==='studio-workflow-mode'?'custom':id==='studio-processing-profile'?'balanced':'hardsub'})};"
              "const DOM={transTone:{value:'natural'}, transSummaryText:{},detailBar:{style:{}},detailStage:{},btnRunAll:{addEventListener:(event,fn)=>{handler=fn}}};"
              "const API={runTranslate:async(id,payload)=>{sent=payload;return{}},runAll:async(id,payload)=>{sent=payload;return{}}};"
              "const waitForTask=async()=>{},refreshProjectData=async()=>{},switchStudioTab=()=>{},confirm=()=>true,alert=()=>{};")
     helper = source[source.index('function readVoiceSettings()'):source.index('async function runVoiceoverTask(')]
+    helper += source[source.index('function readWorkflowOptions('):source.index('function updateWorkflowControls(')]
     script = setup + helper + function + '\n(async()=>{' + invoke + 'console.log(JSON.stringify(sent));})().catch(e=>{console.error(e);process.exit(1)});'
     result = subprocess.run([node, '-e', script], capture_output=True, text=True, encoding='utf-8', check=True, timeout=10)
     payload = json.loads(result.stdout)

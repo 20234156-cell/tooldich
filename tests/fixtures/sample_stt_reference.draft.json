@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0.0",
+  "audio_file": "sample_stt_reference.wav",
+  "audio_sha256": "5c4f4d96bf4a79da5313f7069ede3b147ed52e4b3785c5d04aaeeb6ebc895bef",
+  "duration_seconds": 33.0,
+  "language": "zh",
+  "audit_status": "pending_human_review",
+  "audited_by": null,
+  "audited_at": null,
+  "provenance_notes": "Bản nháp hiệu đính âm học và thuật ngữ chuẩn (Fate/Zero fan animation BV1GnGK6TEgQ, phân đoạn 182.0s - 215.0s). Hội thoại giữa Trung tá Matsui Umeko (航空自卫队中佐松井梅子) và Linh mục Kotomine Kirei (言峰绮礼). Thuật ngữ kinh điển gồm 冬木市, 圣堂教会, 代行者, 维护神秘. Bản nháp này mang trạng thái pending_human_review và kết quả đo lường accuracy dựa trên bản nháp này là provisional, chờ người kiểm duyệt chính thức nghe và phê duyệt.",
+  "segments": [
+    {
+      "id": 1,
+      "start": 0.50,
+      "end": 3.65,
+      "text": "您好，我是航空自卫队中佐松井梅子。",
+      "unclear": false,
+      "notes": "Nhân vật nữ xưng tên và quân hàm Trung tá"
+    },
+    {
+      "id": 2,
+      "start": 3.75,
+      "end": 7.95,
+      "text": "奉命前来调查数日前我军两架战斗机在冬木市失联之事。",
+      "unclear": false,
+      "notes": "Đề cập hai chiến đấu cơ F-15 mất tích tại thành phố Fuyuki"
+    },
+    {
+      "id": 3,
+      "start": 8.15,
+      "end": 11.55,
+      "text": "你们丢失了战机，可这和我有什么关系？",
+      "unclear": false,
+      "notes": "Giọng nam Kotomine Kirei đáp lại"
+    },
+    {
+      "id": 4,
+      "start": 11.65,
+      "end": 15.90,
+      "text": "你不会觉得你们的战机是被我这个平平无奇的神父击落的吗？",
+      "unclear": false,
+      "notes": "Kotomine Kirei thanh minh"
+    },
+    {
+      "id": 5,
+      "start": 16.15,
+      "end": 18.65,
+      "text": "不要以为圣堂教会暗示了所有人。",
+      "unclear": false,
+      "notes": "Nhắc tới Giáo hội Ám thị (圣堂教会)"
+    },
+    {
+      "id": 6,
+      "start": 18.85,
+      "end": 22.15,
+      "text": "军方掌握的信息远比你预期的要多，",
+      "unclear": false,
+      "notes": "Quân đội nắm nhiều thông tin hơn"
+    },
+    {
+      "id": 7,
+      "start": 22.25,
+      "end": 26.15,
+      "text": "言峰绮礼先生，或者说代行者。",
+      "unclear": false,
+      "notes": "Xưng danh Kotomine Kirei và Đại Hành Giả (代行者)"
+    },
+    {
+      "id": 8,
+      "start": 26.25,
+      "end": 31.50,
+      "text": "那你也该知道，为了维护神秘，圣堂教会会做什么？",
+      "unclear": false,
+      "notes": "Đề cập nguyên tắc che giấu bí mật ma thuật (维护神秘)"
+    }
+  ]
+}

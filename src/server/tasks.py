@@ -5,7 +5,7 @@ from src.server import store
 
 FIELDS=('task_id','project_id','job_id','action','state','error_code','error_message','error_details','cancel_requested',
         'progress','stage','created_at','started_at','finished_at','owner','options','fencing_token','interrupted_stage','interrupted_reason_code','retained_summary','input_snapshot')
-SAFE_OPTIONS={'voice','rate','pitch','auto_fit','shorten_to_fit','repair_existing','extraction_mode',
+SAFE_OPTIONS={'mode','title_index','force','voice','rate','pitch','auto_fit','shorten_to_fit','repair_existing','extraction_mode',
               'translation_provider','translation_model','provider','model','batch_size','translation_batch_size','tone','subtitle_style','style','cfg','voice_volume','original_volume'}
 
 

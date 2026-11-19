@@ -104,6 +104,8 @@ def upload(project_id, should_continue=None, progress_callback=None):
         if should_continue and not should_continue():
             raise TaskCancelled()
     try:
+        from src.cloud.drive import require_online
+        require_online()
         continuing()
         path = delivery(project_id)
         cfg = config()
@@ -132,31 +134,32 @@ def upload(project_id, should_continue=None, progress_callback=None):
                 row.encrypted_session = seal({'url':drive.begin(row)})
                 persist(row)
             session = unseal(row.encrypted_session)['url']
-            try:
-                offset = drive.send(session,size)
-            except ExpiredSession:
-                row.encrypted_session = seal({'url':drive.begin(row)})
-                persist(row)
-                session = unseal(row.encrypted_session)['url']
-                offset = drive.send(session,size)
             row.status, row.error = 'UPLOADING', None
             persist(row)
+            from src.cloud.resumable import transfer
+            def check_upload():
+                continuing()
+                current = path.stat()
+                if (current.st_size,current.st_mtime_ns,current.st_ino) != (initial.st_size,initial.st_mtime_ns,initial.st_ino):
+                    raise CloudError('Video thay đổi trong lúc tải. Giữ lại bản trên máy.')
+            def transmit(offset, chunk):
+                return drive.send(session,size,offset,chunk), None
+            def advanced(offset):
+                row.uploaded_bytes = offset
+                persist(row)
+                if progress_callback:
+                    progress_callback(min(99,int(offset*100/size)), f'Tải Drive: {offset}/{size} byte')
             with path.open('rb') as stream:
-                while offset < size:
-                    continuing()
-                    current = path.stat()
-                    if (current.st_size,current.st_mtime_ns,current.st_ino) != (initial.st_size,initial.st_mtime_ns,initial.st_ino):
-                        raise CloudError('Video thay đổi trong lúc tải. Giữ lại bản trên máy.')
-                    stream.seek(offset)
-                    chunk = stream.read(min(CHUNK_SIZE,size-offset))
-                    next_offset = drive.send(session,size,offset,chunk)
-                    if not offset < next_offset <= offset+len(chunk):
-                        raise CloudError('Drive không xác nhận đúng phạm vi byte vừa tải. Bấm tải lại để kiểm tra phiên.')
-                    offset = next_offset
-                    row.uploaded_bytes = offset
-                    persist(row)
-                    if progress_callback:
-                        progress_callback(min(99,int(offset*100/size)), f'Tải Drive: {offset}/{size} byte')
+                try:
+                    transfer(stream,size,transmit,chunk_size=CHUNK_SIZE,check=check_upload,on_progress=advanced)
+                except ExpiredSession:
+                    # The preallocated Drive file ID prevents duplicate objects.
+                    check_upload()
+                    if not drive.exists(row.remote_id):
+                        row.encrypted_session = seal({'url':drive.begin(row)})
+                        persist(row)
+                        session = unseal(row.encrypted_session)['url']
+                        transfer(stream,size,transmit,chunk_size=CHUNK_SIZE,check=check_upload,on_progress=advanced)
             verify_remote(drive,row)
         continuing()
         # Confirm the local identity still matches the exact file archived remotely.
@@ -217,10 +220,31 @@ def remove_local(project_id, upload_id, should_continue=None, progress_callback=
 def auto_archive(project_id, should_continue=None, progress_callback=None):
     """Cloud failure is explicit but must not erase a valid technical QA result."""
     try:
-        if config().get('auto_upload'):
-            return upload(project_id,should_continue,progress_callback)
+        if not settings.OFFLINE_MODE and config().get('auto_upload'):
+            return archive_project_metadata_pack(project_id,should_continue,progress_callback)
     except TaskCancelled:
         raise
     except Exception:
         return {'status':'FAILED','message':'QA kỹ thuật đã hoàn tất nhưng lưu Drive chưa thành công. Mở Kho cloud để thử lại; video trên máy được giữ nguyên.'}
     return {'status':'DISABLED'}
+
+
+def archive_project_metadata_pack(project_id,should_continue=None,progress_callback=None):
+    from src.cloud.metadata_archive import archive_project_metadata_pack as save
+    return save(project_id,should_continue,progress_callback)
+
+
+@account_operation
+def archive_project(project_id,mode='metadata_only',should_continue=None,progress_callback=None):
+    from src.cloud.drive import require_online
+    require_online()
+    if mode=='metadata_only':return archive_project_metadata_pack(project_id,should_continue,progress_callback)
+    if mode!='full_delivery':raise CloudError('Chế độ lưu Drive không hợp lệ.')
+    result=upload(project_id,should_continue,progress_callback)
+    from src.translation.memory import atomic_json
+    path=delivery(project_id)
+    from src.cloud.metadata_archive import project_root
+    content_hash=digest(path,should_continue)[2]
+    atomic_json(project_root(project_id)/'output/drive_archive.json',dict(result,mode='full_delivery',account_id=config().get('account_id'),
+        mp4_sha256=content_hash,content_hash=content_hash))
+    return result

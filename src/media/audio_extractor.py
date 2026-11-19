@@ -1,3 +1,4 @@
+from src.jobs.resources import media_timeout, probe_media_duration
 import shutil
 import subprocess
 from pathlib import Path
@@ -89,7 +90,7 @@ class AudioExtractor:
 
         try:
             from src.jobs.resources import run_media
-            res=run_media(cmd,timeout=settings.FFMPEG_TIMEOUT_SECONDS,stage='EXTRACT_AUDIO')
+            res=run_media(cmd,timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS,probe_media_duration(src)),stage='EXTRACT_AUDIO')
         except subprocess.TimeoutExpired:
             dest.unlink(missing_ok=True)
             raise PipelineException(

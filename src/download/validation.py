@@ -21,6 +21,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 from config.settings import settings
+from src.jobs.resources import media_timeout
 from src.jobs.logger import PipelineException, SystemErrorCodes
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ def validate_download(
             full_decode_cmd,
             capture_output=True,
             text=True,
-            timeout=getattr(settings, "FFMPEG_TIMEOUT_SECONDS", 1800),
+            timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS, duration),
             check=False,
         )
         if res_full.returncode != 0 or res_full.stderr.strip():

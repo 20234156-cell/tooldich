@@ -6,13 +6,15 @@
     const response = await fetch('/api/voices');
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
+    if (data.default) window.defaultVoice = data.default;
+    if(typeof window !== 'undefined' && window.workspaceOffline) select.replaceChildren();
     for (const voice of data.voices || []) {
       const existing = Array.from(select.options).find(option => option.value === voice.id);
       if (existing && existing.dataset?.unavailable !== 'true') continue;
       if (existing) existing.remove();
       const option = document.createElement('option');
       option.value = voice.id;
-      option.textContent = voice.name + (voice.provider === 'vieneu' ? ' — VieNeu tại máy' : '');
+      option.textContent = voice.name + (voice.provider === 'vieneu' ? ' — VieNeu tại máy' : voice.provider === 'piper' ? ' — Piper Siêu tốc' : '');
       select.appendChild(option);
     }
   } catch (error) {

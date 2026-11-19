@@ -11,7 +11,7 @@ Handles:
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, model_validator
 import numpy as np
 
@@ -45,6 +45,10 @@ class ROIBox(BaseModel):
         if self.y + self.height > 1.0:
             self.height = max(0.001, 1.0 - self.y)
         return self
+
+
+class ManualMask(ROIBox):
+    method: Literal['blur', 'delogo'] = 'blur'
 
 
 def to_pixel_rect(box: ROIBox, video_w: int, video_h: int) -> Tuple[int, int, int, int]:
@@ -289,6 +293,7 @@ def auto_detect_subtitle_roi(
     crop_bottom_ratio: float = 0.35,
 ) -> ROIBox:
     """Scan video frames to automatically detect optimal Chinese subtitle bounding box."""
+    from collections import Counter
     import cv2
     import re
     from rapidocr_onnxruntime import RapidOCR
@@ -306,21 +311,19 @@ def auto_detect_subtitle_roi(
         cap.release()
         return ROIBox(id="roi_sub", type="chinese_subtitle", x=0.10, y=0.88, width=0.80, height=0.09, label="Mặc định cạnh đáy")
 
-    sample_fractions = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80]
+    frame_indices = sorted({int(total_frames * fraction) for fraction in
+                            np.linspace(.10, .80, max(1, min(num_samples, 32)))})
     detected_boxes = []
 
-    try:
-        ocr = RapidOCR()
-        y_crop_start = int((1.0 - crop_bottom_ratio) * h)
-
-        for frac in sample_fractions:
-            frame_idx = int(total_frames * frac)
+    def scan(top, bottom):
+        boxes = []
+        for frame_idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             if not ret or frame is None:
                 continue
 
-            crop = frame[y_crop_start:h, :]
+            crop = frame[top:bottom, :]
             res, _ = ocr(crop)
             if not res:
                 continue
@@ -330,15 +333,61 @@ def auto_detect_subtitle_roi(
                 if re.search(r"[\u4e00-\u9fff]", text) and len(text.strip()) >= 2 and score >= 0.70:
                     min_x_c = min(pt[0] for pt in box)
                     max_x_c = max(pt[0] for pt in box)
-                    min_y_c = min(pt[1] for pt in box) + y_crop_start
-                    max_y_c = max(pt[1] for pt in box) + y_crop_start
+                    min_y_c = min(pt[1] for pt in box) + top
+                    max_y_c = max(pt[1] for pt in box) + top
 
                     norm_x1 = max(0.0, min_x_c / w)
                     norm_x2 = min(1.0, max_x_c / w)
                     norm_y1 = max(0.0, min_y_c / h)
                     norm_y2 = min(1.0, max_y_c / h)
 
-                    detected_boxes.append((norm_x1, norm_y1, norm_x2, norm_y2))
+                    normalized = ''.join(char for char in text if char.isalnum()).casefold()
+                    if normalized and norm_y1 < norm_y2 and norm_x1 < norm_x2:
+                        boxes.append((norm_x1, norm_y1, norm_x2, norm_y2, frame_idx, normalized))
+        return boxes
+
+    def group_bands(candidates):
+        bands = []
+        for box in sorted(candidates, key=lambda b: (b[1]+b[3])/2):
+            centre = (box[1]+box[3])/2
+            if bands and abs(centre-np.median([(b[1]+b[3])/2 for b in bands[-1]])) <= .05:
+                bands[-1].append(box)
+            else:
+                bands.append([box])
+        return bands
+
+    try:
+        ocr = RapidOCR(intra_op_num_threads=4, inter_op_num_threads=1)
+        lower_start = int((1.0 - crop_bottom_ratio) * h)
+        lower = scan(lower_start, h)
+        if lower:
+            centered = [b for b in lower if b[0] <= .5 <= b[2]]
+            bands = group_bands(centered or lower)
+            detected_boxes = max(bands, key=lambda band: (len(band), np.median([b[3] for b in band])))
+            chosen_top = float(np.median([b[1] for b in detected_boxes]))
+            chosen_bottom = float(np.median([b[3] for b in detected_boxes]))
+            # Use every box around the winning band to count repeated menu
+            # labels, including labels outside the centered text filter.
+            band_frames = {}
+            for b in lower:
+                if chosen_top - .015 <= (b[1]+b[3])/2 <= chosen_bottom + .015:
+                    band_frames.setdefault(b[4], set()).add(b[5])
+            signatures = Counter(frozenset(texts) for texts in band_frames.values())
+            repeated = max(signatures.values(), default=0)
+            if repeated >= 3 and repeated * 4 >= len(frame_indices) * 3 and lower_start > 0:
+                upper = scan(0, lower_start)
+                candidates = []
+                for band in group_bands([b for b in upper if b[0] <= .5 <= b[2] and b[2]-b[0] >= .15]):
+                    counts = Counter(b[5] for b in band)
+                    # A title repeated in most frames may have a one-off OCR
+                    # spelling error. Keep only bands with real text diversity.
+                    if len(counts) < 3 or max(counts.values()) * 2 > len(band):
+                        continue
+                    if len({b[4] for b in band}) >= 3:
+                        candidates.append(band)
+                if candidates:
+                    detected_boxes = max(candidates, key=lambda band: (
+                        len({b[4] for b in band}), np.median([b[3] for b in band])))
     except Exception as exc:
         logger.warning(f"Auto ROI detection failed during OCR: {exc}")
     finally:
@@ -347,21 +396,16 @@ def auto_detect_subtitle_roi(
     if detected_boxes:
         y1s = [b[1] for b in detected_boxes]
         y2s = [b[3] for b in detected_boxes]
-        x1s = [b[0] for b in detected_boxes]
-        x2s = [b[2] for b in detected_boxes]
-
         med_y1 = float(np.median(y1s))
         med_y2 = float(np.median(y2s))
-        min_x = min(x1s)
-        max_x = max(x2s)
 
         # Padding: comfortable vertical padding and generous horizontal padding for long sentences
         pad_y = 0.02
-        pad_x = 0.15
         opt_y1 = max(0.0, round(med_y1 - pad_y, 4))
         opt_y2 = min(1.0, round(med_y2 + pad_y, 4))
-        opt_x1 = max(0.06, round(min_x - pad_x, 4))
-        opt_x2 = min(0.94, round(max_x + pad_x, 4))
+        # Short sampled utterances cannot predict the width of later dialogue.
+        opt_x1 = 0.06
+        opt_x2 = 0.94
 
         return ROIBox(
             id="roi_sub",

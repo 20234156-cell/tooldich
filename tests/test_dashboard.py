@@ -9,6 +9,37 @@ from src.pipeline.state_machine import PipelineState, ProjectState, save_pipelin
 from config.settings import settings
 
 
+def test_attention_separates_missing_from_translated_pending_and_names_project():
+    with connection.SessionLocal() as db:
+        db.add(Project(id='review', title='Needs dialogue verification'))
+        db.add(Transcript(project_id='review', segments=[
+            dict(vi_text='', is_approved=False), dict(vi_text='Xin chào', is_approved=False),
+            dict(vi_text='Đã duyệt', is_approved=True), dict(vi_text=' ', is_approved=True)]))
+        db.commit()
+    data = TestClient(app).get('/api/dashboard').json()
+    assert data['projects']['missing_translation'] == 2
+    assert data['projects']['translated_pending'] == 1
+    assert data['attention'] == [dict(project_id='review', title='Needs dialogue verification',
+                                    stage='CREATED', task_state=None, task_action=None,
+                                    missing_translation=2, translated_pending=1)]
+
+
+def test_attention_keeps_technical_stage_separate_from_cue_review(monkeypatch):
+    from src.jobs.queue import queue
+    with connection.SessionLocal() as db:
+        for pid, stage in [('complete', ProjectState.VERIFIED), ('encoding', ProjectState.VOICE_READY)]:
+            db.add(Project(id=pid, title=pid))
+            db.add(Transcript(project_id=pid, segments=[dict(vi_text='Đã dịch', is_approved=False)]))
+            save_pipeline_state(settings.storage_path/pid, PipelineState(current_state=stage))
+        db.commit()
+    monkeypatch.setattr(queue, 'get_by_project',
+                        lambda pid: NS(state='RUNNING', action='render') if pid == 'encoding' else None)
+    rows = {row['project_id']: row for row in TestClient(app).get('/api/dashboard').json()['attention']}
+    assert rows['complete']['stage'] == 'VERIFIED' and rows['complete']['translated_pending'] == 1
+    assert rows['encoding']['stage'] == 'VOICE_READY'
+    assert (rows['encoding']['task_state'], rows['encoding']['task_action']) == ('RUNNING', 'render')
+
+
 def test_dashboard_uses_whole_workspace_and_keeps_missing_data_unknown(monkeypatch):
     from src.jobs.queue import queue
     with connection.SessionLocal() as db:
@@ -81,8 +112,12 @@ def test_project_filter_render_does_not_rewrite_workspace_totals_or_infer_qa():
     function=source[source.index('function renderProjects('):source.index('// System Health Poller')]
     harness="""
 const elements={};
-const document={getElementById:id=>elements[id]||=( {}),querySelectorAll:()=>[]};
-const DOM={statTotal:{textContent:'12'},statVerified:{textContent:'3'},statProcessing:{textContent:'2'},projectRows:{}};
+const document={getElementById:id=>elements[id]||=({classList:{toggle(){}},querySelectorAll:()=>[]}),querySelectorAll:()=>[]};
+const projectList={items:[],selected:new Set(),query:'',page:1,size:10,busy:false};
+const projectUI=id=>document.getElementById('project-'+id);
+const projectFiltered=()=>projectList.items;
+const projectSelectionChanged=()=>{};
+const DOM={statTotal:{textContent:'12'},statVerified:{textContent:'3'},statProcessing:{textContent:'2'},projectRows:{querySelectorAll:()=>[]}};
 const escapeHtml=v=>String(v);
 """+function+"""
 renderProjects([{id:'legacy',stage:'COMPLETED',status:'COMPLETED'}]);

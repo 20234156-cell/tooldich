@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,9 +14,27 @@ class Settings(BaseSettings):
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
+    PERSONAL_MODE: bool = True
+    PIPELINE_SERIALIZE_HEAVY_TASKS: bool = True
+    OFFLINE_MODE: bool = False
+
+    @model_validator(mode='after')
+    def offline_defaults(self):
+        if self.PERSONAL_MODE or self.OFFLINE_MODE:
+            self.SERVER_MODE = False
+            self.SERVER_AUTO_BACKUP_HOURS = 0
+            self.SERVER_PUBLIC_URL = ''
+            self.TRUSTED_PROXY_IPS = []
+            self.ALLOWED_HOSTS = '127.0.0.1,localhost,[::1],testserver'
+            self.API_TOKEN = None
+        if self.OFFLINE_MODE:
+            self.LOCAL_TRANSLATION_URL = 'http://127.0.0.1:8091/v1'
+            self.EDGE_TTS_VOICE = 'vieneu:ngoc_huyen_review_phim'
+        return self
 
     # Database
     DATABASE_URL: str = "sqlite:///./storage/app.db"
+    OCR_LEARNING_DIR: Optional[str] = None
 
     # Storage Paths
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
@@ -30,11 +48,13 @@ class Settings(BaseSettings):
     # tạo + quét proxy 960px 34.06s, cùng tìm được 17 cue.
     VSF_USE_SCAN_PROXY: bool = True
     VSF_PROXY_WIDTH: int = 960
+    VSF_PROXY_FILTER_THREADS: int = Field(default=1, ge=1, le=16)
+    OCR_SOURCE_SPOOL_MAX_BYTES: int = Field(default=2 * 1024**3, ge=0, le=16 * 1024**3)
 
     # Network & Limits
     REQUEST_TIMEOUT_SECONDS: int = 30
-    MAX_DOWNLOAD_SIZE_BYTES: int = 8 * 1024**3  # 8 GiB, including long-form 1080p
-    MAX_VIDEO_DURATION_SECONDS: int = 3 * 3600  # 3 hours; measured example: 132 min
+    MAX_DOWNLOAD_SIZE_BYTES: int = 24 * 1024**3  # 24 GiB; disk preflight still applies
+    MAX_VIDEO_DURATION_SECONDS: int = 6 * 3600  # 6 hours; not a hardware throughput guarantee
     # Trần cứng số lượt tải. MAX_RETRIES chỉ đếm những lượt KHÔNG nhích được byte nào
     # (xem DownloadManager._account_progress), nên lượt nào tải thêm được là ngân sách
     # hồi lại - nhờ vậy tệp cỡ GB trên đường truyền hay đứt vẫn về đích. Trần này để
@@ -53,10 +73,10 @@ class Settings(BaseSettings):
     # Mã chất lượng xin Bilibili (qn): 16=360P, 32=480P, 64=720P, 80=1080P, 116=1080P60.
     # Khi có tài khoản (SESSDATA/Cookie), hệ thống sẽ tải thẳng luồng 1080P Full HD siêu nét.
     BILIBILI_PREFERRED_QUALITY: int = 80
-    BILIBILI_COOKIE: Optional[str] = None
+    BILIBILI_COOKIE: Optional[str] = Field(default=None, repr=False)
     DOUYIN_COOKIE_FILE: Optional[str] = None  # User-supplied Netscape cookie file
     DOUYIN_BROWSER_PROFILE: Optional[str] = None  # Separate persistent Chromium profile
-    BILIBILI_SESSDATA: Optional[str] = None
+    BILIBILI_SESSDATA: Optional[str] = Field(default=None, repr=False)
 
     # Supported Media Codecs
     SUPPORTED_VIDEO_CODECS: set[str] = {
@@ -73,6 +93,9 @@ class Settings(BaseSettings):
     # 17 lần xuống 3 lần. Để trống nếu muốn dùng audio nguyên bản.
     STT_AUDIO_FILTER: str = "highpass=f=180,lowpass=f=3400,afftdn=nf=-25"
     WHISPER_MODEL_SIZE: str = "auto"
+    OCR_AUDIO_RECHECK: bool = True
+    AUTO_SKIP_UNCERTAIN: bool = True
+    OCR_AUDIO_MODEL_DIR: Optional[str] = None
     # auto = dùng GPU NVIDIA nếu có (nhanh ~3.6 lần, đo trên GTX 1050 Ti), không thì CPU
     WHISPER_DEVICE: str = "auto"          # auto | cuda | cpu
     WHISPER_COMPUTE_TYPE: str = "auto"    # auto | int8 | int8_float16 | float16 | float32
@@ -96,6 +119,7 @@ class Settings(BaseSettings):
     MAX_SCENES: int = 200
     KEYFRAME_WIDTH: int = 640
     OCR_ENABLED: bool = True
+    OCR_DEVICE: str = 'auto'  # validated isolated CUDA runtime, otherwise CPU
     OCR_LANGUAGES: str = "chi_sim+eng"
     TESSERACT_PATH: Optional[str] = None
     TESSDATA_PREFIX: Optional[str] = None
@@ -113,7 +137,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     TARGET_LANGUAGE: str = "vi"
     TRANSLATION_MODEL: str = 'gemini-3.5-flash-lite'
-    TRANSLATION_FALLBACK_MODELS: str = 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.1-flash-lite'
+    TRANSLATION_FALLBACK_MODELS: str = 'gemini-3.1-flash-lite,gemini-3.8-flash,gemini-3.6-flash'
     TRANSLATION_REPAIR_MODEL: str = 'gemini-3.8-flash'
     TRANSLATION_BATCH_SIZE: int = 100
     TRANSLATION_BATCH_MAX_CHARS: int = 18000
@@ -122,6 +146,8 @@ class Settings(BaseSettings):
     TRANSLATION_KEY_RPM: int = 12
     TRANSLATION_MAX_WORKERS: int = 5
     LOCAL_TRANSLATION_URL: Optional[str] = None
+    AZURE_TRANSLATOR_KEY: Optional[str] = Field(default=None, repr=False)
+    AZURE_TRANSLATOR_REGION: Optional[str] = None
     LOCAL_TRANSLATION_API_KEY_FILE: str = 'config/local_translation.key'
     TRANSLATION_MAX_TOKENS: int = 16000
     AI_MAX_TOKENS: int = 16000
@@ -130,7 +156,8 @@ class Settings(BaseSettings):
     AI_CONCURRENCY: int = 3
 
     # Lồng tiếng (Text-to-Speech)
-    TTS_PROVIDER: str = "edge"  # edge (miễn phí, không hạn mức) | gemini
+    TTS_PROVIDER: str = "piper"  # piper (mô hình ONNX cục bộ siêu tốc, không cần mạng) | edge | gemini
+    DEFAULT_TTS_VOICE: str = "piper:ngochuyen"
     EDGE_TTS_VOICE: str = "vi-VN-NamMinhNeural"
     EDGE_TTS_RATE: str = "+12%"
     GEMINI_TTS_MODEL: str = "gemini-3.1-flash-tts-preview"
@@ -153,6 +180,9 @@ class Settings(BaseSettings):
     # lỗi ở mức nào. Chọn 16 làm mặc định cân bằng; tăng lên 32 nếu cần nhanh hơn.
     TTS_CONCURRENCY: int = 4
     VIENEU_CPU_THREADS: int = Field(default=2, ge=1, le=8)
+    VIENEU_BATCH_SIZE: int = Field(default=1, ge=1, le=8)
+    VIENEU_BATCH_MAX_CHARS: int = Field(default=1200, ge=128, le=4096)
+    VIENEU_DEVICE: str = 'auto'  # auto uses a locally validated GPU runtime; cpu | cuda
     TTS_NETWORK_CONCURRENCY: int = 8
     TTS_REQUEST_TIMEOUT_SECONDS: float = 15.0
     TTS_TOTAL_DEADLINE_SECONDS: float = 45.0
@@ -173,7 +203,10 @@ class Settings(BaseSettings):
     TTS_MIN_PAUSE_SECONDS: float = Field(default=.04, ge=0.0, le=.15)
     TTS_MAX_BORROW_SECONDS: float = Field(default=.25, ge=0.0, le=.3)
     TIMING_REPAIR_MAX_CUES: int = Field(default=150, ge=1, le=1000)
+    TIMING_SHORTENER_BATCH_SIZE: int = Field(default=20, ge=1, le=50)
     TIMING_REPAIR_MAX_PASSES: int = Field(default=2, ge=0, le=2)
+    BUDGET_TRANSLATION_VARIANTS: int = Field(default=3, ge=1, le=3)
+    BUDGET_SOURCE_WINDOW_LIMIT: int = Field(default=24, ge=1, le=500)
     # Độ trôi tối đa cho phép trước khi kích hoạt nén câu tiếp theo để kéo về
     MAX_DRIFT_SECONDS: float = 1.0
     FIT_VOICEOVER_TO_VIDEO: bool = False
@@ -207,6 +240,10 @@ class Settings(BaseSettings):
     SUBTITLE_BURN_PRESET: str = "faster"
     # auto = dùng NVENC của GPU NVIDIA nếu ffmpeg mở được nó, không thì libx264 (CPU)
     VIDEO_ENCODER: str = "auto"  # auto | nvenc | cpu
+    DEFAULT_PLATFORM_PRESET: str = "auto"  # auto | ytb_16_9 | tiktok_reels_9_16 | fb_feed
+    DEFAULT_TARGET_PART_SECONDS: int = Field(default=180, ge=60, le=900)
+    COMPLIANCE_GATE_ENABLED: bool = True
+    AI_STEM_SEPARATION_DEFAULT: bool = False
 
     # Làm sạch khung hình: che watermark góc và dải phụ đề cứng của video gốc.
     # Bộ dò đo "chữ sáng có viền tối" rồi phân loại theo độ bền thời gian. Khi
@@ -253,6 +290,22 @@ class Settings(BaseSettings):
         for value in values:ipaddress.ip_address(value)
         return values
 
+    TELEGRAM_NOTIFY_ENABLED: bool = False
+    TELEGRAM_BOT_TOKEN: str = Field(default='', repr=False)
+    TELEGRAM_CHAT_ID: str = Field(default='', repr=False)
+    TELEGRAM_POLLING_ENABLED: bool = True
+    TELEGRAM_POLL_INTERVAL_SECONDS: float = Field(default=2.5, ge=0.5, le=30.0)
+    TELEGRAM_DEMO_TRIGGER_DURATION_SECONDS: int = Field(default=900, ge=60)
+    AUTO_DISK_GUARD_ENABLED: bool = True
+    AUTO_DISK_GUARD_MIN_FREE_GB: float = Field(default=8.0, ge=2.0, le=100.0)
+
+    # Thương hiệu & lịch đăng kênh mặc định (có thể cấu hình động qua .env)
+    PUBLISHING_CHANNEL_NAME: str = "NpzzSub Review"
+    PUBLISHING_CHANNEL_HANDLE: str = "@NpzzSub"
+    PUBLISHING_CHANNEL_URL: str = "www.youtube.com/@NpzzSub"
+    PUBLISHING_SCHEDULE: str = "11:30 & 19:30"
+    PUBLISHING_HASHTAGS: str = "#NpzzSub,#NpzzSubReview,#Vietsub"
+
     SERVER_MODE: bool = False
     SERVER_PUBLIC_URL: str = ""
 
@@ -294,3 +347,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if settings.OFFLINE_MODE:
+    from src.security.offline import install_offline_guard
+    install_offline_guard()

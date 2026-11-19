@@ -8,13 +8,36 @@ Contracts:
 - Low confidence cues preserved for review
 """
 
+import json
 import pytest
 import numpy as np
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.ocr.base import Cue, cues_to_srt, format_srt_timestamp
-from src.ocr.deduplicate import deduplicate_cues, text_similarity
+from src.ocr.deduplicate import deduplicate_cues, flag_possible_tail_loss, text_similarity
+
+
+def test_adjacent_high_confidence_tail_loss_requires_review_without_merging():
+    from src.jobs.logger import PipelineException
+    from src.pipeline.orchestrator import PipelineOrchestrator
+
+    left = Cue(index=8, start=10.267, end=10.932, text='上个月绩效奖金怎么没的你忘了', confidence=98)
+    right = Cue(index=9, start=10.933, end=12.332, text='上个月绩效奖金怎么没的你忘', confidence=97)
+    raw = deduplicate_cues([left, right], preserve_ids=True)
+    flagged = flag_possible_tail_loss(raw)
+    assert [(c.index, c.start, c.end, c.text) for c in flagged] == [
+        (c.index, c.start, c.end, c.text) for c in raw]
+    assert not raw[1].ocr_alternatives
+    assert flagged[1].ocr_alternatives[0]['related_cue'] == 8
+    assert flag_possible_tail_loss(flagged) == flagged
+    with pytest.raises(PipelineException) as raised:
+        PipelineOrchestrator._validate_source_review(flagged)
+    assert raised.value.details['cue_indices'] == [9]
+    for changes in ({'source_kind': 'stt'}, {'start': 11.2}, {'text': left.text[:-1] + '吗'},
+                    {'corrected_text': right.text}):
+        updated = right.model_copy(update=changes)
+        assert flag_possible_tail_loss([left, updated]) == [left, updated]
 from src.ocr.rapidocr_engine import RapidOCREngine
 from src.ocr.vsf_adapter import VideoSubFinderAdapter
 from src.pipeline.roi import ROIBox
@@ -122,6 +145,8 @@ def test_both_ocr_paths_preserve_uncertain_text_and_alternatives(tmp_path, confi
                   cv2.CAP_PROP_FRAME_WIDTH: 100, cv2.CAP_PROP_FRAME_HEIGHT: 100}
     scan.get.side_effect = lambda prop: properties.get(prop, 0)
     scan.read.return_value = (True, image)
+    scan.grab.return_value = True
+    scan.retrieve.return_value = (True, image)
     reader.read.return_value = (True, image)
     detector = CueDetector()
     detector.ocr_engine = MagicMock()
@@ -241,11 +266,17 @@ def test_proxy_reports_encoded_time_while_process_is_running(tmp_path):
     updates = []
     with patch('src.ocr.vsf_adapter.cv2.VideoCapture', return_value=cap), \
          patch('src.pipeline.render.get_ffmpeg_bin', return_value='ffmpeg'), \
+         patch('src.gpu.nvenc_available', return_value=True), \
          patch('src.ocr.vsf_adapter.subprocess.Popen', side_effect=popen) as launch:
         proxy = VideoSubFinderAdapter()._create_scan_proxy(tmp_path/'source.mp4', tmp_path,
             0, None, progress_callback=lambda pct, stage:updates.append((pct, stage)))
     assert proxy and proxy.is_file()
     assert '-progress' in launch.call_args.args[0]
+    assert 'scale=960:-2' in launch.call_args.args[0]
+    assert 'h264_nvenc' in launch.call_args.args[0]
+    command = launch.call_args.args[0]
+    assert command[command.index('-filter_threads') + 1] == '1'
+    assert json.loads((tmp_path/'vsf_proxy.json').read_text())['decoder'] == 'software'
     assert any('10/20' in stage and '50%' in stage for _, stage in updates)
 
 
@@ -260,7 +291,7 @@ def test_extraction_modes_share_reviewable_cues(tmp_path, mode, sample_good, exp
     roi = ROIBox(x=.1, y=.8, width=.8, height=.1)
     from src.pipeline.roi import ROISet
     good = [Cue(index=i+1, start=i*2, end=i*2+1, text='测试文字', confidence=95) for i in range(3)]
-    with patch.object(pipeline, 'get_project_dir', return_value=tmp_path), patch.object(pipeline, 'get_source_video_path', return_value=source), patch.object(pipeline, 'get_roi_set', return_value=ROISet(rois=[roi]) if mode == 'auto' else ROISet()), patch.object(pipeline, 'get_state', return_value=state), patch.object(pipeline, 'save_state'), patch.object(pipeline, 'save_cues') as save, patch('src.pipeline.orchestrator.VideoSubFinderAdapter.extract_cues', side_effect=[good if sample_good else [], good]) as ocr, patch('src.pipeline.extraction.recognize_audio', return_value=(good, ['STT evidence'])) as stt:
+    with patch.object(pipeline, 'get_project_dir', return_value=tmp_path), patch.object(pipeline, 'get_source_video_path', return_value=source), patch.object(pipeline, 'get_roi_set', return_value=ROISet(rois=[roi]) if mode == 'auto' else ROISet()), patch.object(pipeline, 'get_state', return_value=state), patch.object(pipeline, 'save_state'), patch.object(pipeline, 'save_cues') as save, patch('src.pipeline.orchestrator.VideoSubFinderAdapter.extract_cues', side_effect=[good, good] if sample_good else [[], [], good]) as ocr, patch('src.pipeline.extraction.recognize_audio', return_value=(good, ['STT evidence'])) as stt:
         result = pipeline.run_ocr('p', extraction_mode=mode)
     assert len(result) == 3
     assert state.current_state == ProjectState.OCR_READY
@@ -268,6 +299,11 @@ def test_extraction_modes_share_reviewable_cues(tmp_path, mode, sample_good, exp
     assert stt.called == (expected_engine == 'faster-whisper')
     if mode == 'stt':
         ocr.assert_not_called()  # audio recognition must not depend on subtitles/ROI
+    elif sample_good:
+        assert ocr.call_args_list[0].kwargs['max_duration'] == 10
+        assert ocr.call_count == 2
+    else:
+        assert [c.kwargs.get('max_duration') for c in ocr.call_args_list] == [10, 45]
     assert state.get_stage('OCR_READY').warnings or mode == 'hardsub'
     save.assert_called_once()
 
@@ -347,4 +383,47 @@ def test_ambiguous_ocr_needs_corrected_source_before_approval(tmp_path):
         cue.corrected_text = '哈哈哈'
         assert runner.approve_source_cues('p').current_state == ProjectState.SOURCE_REVIEWED
     assert cue.text == '品品品'
+
+def test_vsf_retries_on_cpu_when_gpu_worker_fails(monkeypatch):
+    from src.ocr.gpu_client import OCRGPUError
+    from src.ocr.rapidocr_engine import RapidOCREngine
+    from src.ocr.vsf_adapter import VideoSubFinderAdapter
+
+    adapter = VideoSubFinderAdapter()
+    calls = []
+
+    def extract():
+        calls.append(adapter._ocr_engine)
+        if len(calls) == 1:
+            raise OCRGPUError('worker failed')
+        return []
+
+    monkeypatch.setattr(adapter, '_extract_cues', extract)
+    assert adapter.extract_cues() == []
+    assert len(calls) == 2 and isinstance(calls[-1], RapidOCREngine)
+    assert any('CPU' in warning for warning in adapter.warnings)
+
+
+def test_source_review_retries_failed_crop_and_keeps_cpu(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    from src.ocr.gpu_client import GPUOCREngine, OCRGPUError
+    from src.ocr.vsf_adapter import VideoSubFinderAdapter
+
+    adapter = VideoSubFinderAdapter()
+    gpu = GPUOCREngine((tmp_path, 'test'))
+    adapter._ocr_engine = gpu
+    monkeypatch.setattr(gpu, 'read_boxes', Mock(side_effect=[['gpu'], OCRGPUError('allocation failed')]))
+    monkeypatch.setattr(gpu, 'close', Mock())
+    cpu = Mock()
+    cpu.read_boxes.return_value = ['cpu']
+    monkeypatch.setattr('src.ocr.vsf_adapter.RapidOCREngine', lambda: cpu)
+    review = adapter.review_recognizer()
+    crop = object()
+    assert review.read_boxes(crop) == ['gpu']
+    assert review.read_boxes(crop, preprocess=True) == ['cpu']
+    cpu.read_boxes.assert_called_once_with(crop, preprocess=True)
+    assert review.read_boxes(crop) == ['cpu']
+    assert adapter.review_recognizer().engine is cpu
+    gpu.close.assert_called_once()
+    assert len(adapter.warnings) == 1
 

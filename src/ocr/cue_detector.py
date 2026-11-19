@@ -97,11 +97,13 @@ class CueDetector:
                 cap.release()
                 raise TaskCancelled()
 
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            if not cap.grab():
                 break
 
             if (curr_frame_idx - start_frame) % step_frames == 0:
+                ret, frame = cap.retrieve()
+                if not ret or frame is None:
+                    break
                 t = curr_frame_idx / fps
                 crop = frame[top : top + rh, left : left + rw]
                 if crop.size > 0:

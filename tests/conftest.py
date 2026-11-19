@@ -10,10 +10,13 @@ from sqlalchemy.orm import sessionmaker
 # autouse fixtures run. Sandbox that bootstrap too, not only individual tests.
 import os
 import tempfile
+os.environ['OFFLINE_MODE']='false'
+os.environ['PERSONAL_MODE']='false'
 _COLLECTION_SANDBOX=tempfile.TemporaryDirectory(prefix='duan_pytest_collection_')
 _COLLECTION_ROOT=Path(_COLLECTION_SANDBOX.name)
 os.environ['DATABASE_URL']='sqlite:///'+(_COLLECTION_ROOT/'app.db').as_posix()
 os.environ['STORAGE_DIR']=str(_COLLECTION_ROOT/'projects')
+os.environ['OCR_LEARNING_DIR']=str(_COLLECTION_ROOT/'learning')
 
 from config.settings import settings
 from src.database.models import Base
@@ -34,14 +37,38 @@ def prohibit_external_network(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolated_env(tmp_path, monkeypatch):
+def isolated_env(tmp_path, monkeypatch, request):
     """Isolate storage and database for every test."""
     test_db_path = tmp_path / "test_app.db"
+    monkeypatch.setattr(settings, 'OFFLINE_MODE', False)
+    monkeypatch.setattr(settings, 'PERSONAL_MODE', False)
+    monkeypatch.setattr(settings, 'VIENEU_DEVICE', 'cpu')
+    monkeypatch.setattr(settings, 'OCR_DEVICE', 'cpu')
+    monkeypatch.setattr('src.pipeline.audio_qc.probe_media_duration', lambda _: 0)
+    monkeypatch.setattr('src.media.mixer.probe_media_duration', lambda _: 0)
+    monkeypatch.setattr('src.media.audio_extractor.probe_media_duration', lambda _: 0)
+    from src.ocr import audio_recheck
+    # Legacy audio-QC unit fixtures contain placeholder bytes, not containers.
+    if request.node.path.name.startswith('test_audio_qc'):
+        monkeypatch.setattr('src.pipeline.audio_qc.has_video_stream', lambda path: path.suffix.lower() != '.m4a')
+    monkeypatch.setattr(audio_recheck, 'review_cuda_runtime', lambda _: None)
+    monkeypatch.setattr(audio_recheck, 'available_ram_bytes', lambda: 8 * 1024**3)
+    # OCR integration fixtures have no real speech. Hybrid tests inject their
+    # own evidence and the live model audit runs outside pytest.
+    monkeypatch.setattr(settings, 'OCR_AUDIO_RECHECK', False)
+    monkeypatch.setattr(settings, 'AUTO_SKIP_UNCERTAIN', False)
+    # Real operator .env may select a local voice. Generic offline tests mock
+    # Edge explicitly; local-routing regressions select their own local voice.
+    monkeypatch.setattr(settings, 'DEFAULT_TTS_VOICE', 'vi-VN-NamMinhNeural')
+    monkeypatch.setattr(settings, 'EDGE_TTS_VOICE', 'vi-VN-NamMinhNeural')
+    # Operator quality preferences must not change offline provider regressions.
+    monkeypatch.setattr(settings, 'BILIBILI_PREFERRED_QUALITY', 80)
     test_storage = tmp_path / "projects"
     test_storage.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(settings, "DATABASE_URL", f"sqlite:///{test_db_path.as_posix()}")
     monkeypatch.setattr(settings, "STORAGE_DIR", str(test_storage))
+    monkeypatch.setattr(settings, "OCR_LEARNING_DIR", str(tmp_path / 'learning'))
     monkeypatch.setattr(settings, "GEMINI_API_KEY", "fake-test-key")
     monkeypatch.setattr(settings, "DOUYIN_COOKIE_FILE", None)
     monkeypatch.setattr(settings, "SERVER_BACKUP_DIRECTORY", None)

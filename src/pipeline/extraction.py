@@ -17,10 +17,12 @@ def recognize_audio(video_path: Path, output_dir: Path, progress_callback=None, 
         raise TaskCancelled()
     provider = WhisperSTTProvider()
     result = provider.transcribe(
-        audio.file_path, language="zh", should_continue=should_continue,
+        audio.file_path, language=None, should_continue=should_continue,
         on_progress=(lambda fraction: progress_callback(10 + int(fraction * 85), "Whisper nhận dạng lời thoại")) if progress_callback else None,
     )
-    cues = [Cue(index=index, start=segment.start, end=segment.end, text=segment.original)
+    cues = [Cue(index=index, start=segment.start, end=segment.end, text=segment.original, source_kind='stt')
             for index, segment in enumerate(result.segments, 1) if segment.original.strip() and segment.end > segment.start]
     warnings = ["Nguồn phụ đề được nhận dạng từ audio bằng Whisper; cần duyệt lại lời thoại và timing."]
+    if result.language and result.language != "unknown":
+        warnings.append(f"Ngôn ngữ Whisper nhận diện: {result.language}.")
     return cues, warnings

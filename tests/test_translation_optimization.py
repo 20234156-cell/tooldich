@@ -41,6 +41,27 @@ def test_compact_large_batch_and_structured_schema(tmp_path, monkeypatch, batch_
     assert factory.call_count == 1
 
 
+def test_single_cue_repair_timeout_falls_back_to_selected_healthy_primary(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, 'TRANSLATION_REPAIR_MODEL', 'slow-repair')
+    pool = make_pool(tmp_path, 1)
+    monkeypatch.setattr(pool, 'wait_translation_turn', lambda *args: None)
+    seen = []
+    def generate(**request):
+        seen.append(request['model'])
+        if request['model'] == 'slow-repair':
+            raise RuntimeError('504 Provider timeout')
+        rows = payload(request['contents'])['to_translate']
+        return SimpleNamespace(text=json.dumps([
+            {'id': row['id'], 'text': '' if len(seen) == 1 and row['id'] == 10 else 'Bản dịch đạt'}
+            for row in rows]), candidates=[], model_version='offline-v1')
+    translator = BatchTranslator(pool=pool, model='selected-healthy')
+    with patch('google.genai.Client') as factory:
+        factory.return_value.models.generate_content.side_effect = generate
+        result = translator.translate_cues(source_cues(2), tmp_path)
+    assert seen == ['selected-healthy', 'slow-repair', 'selected-healthy']
+    assert [cue.vi_text for cue in result] == ['Bản dịch đạt', 'Bản dịch đạt']
+
+
 def test_character_budget_splits_before_request(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'TRANSLATION_BATCH_MAX_CHARS', 15)
     translator = BatchTranslator(pool=make_pool(tmp_path, 1), batch_size=150)
@@ -219,6 +240,7 @@ def test_selected_translation_real_database_and_invalidation(tmp_path, db_sessio
     runner.get_project_dir = lambda _: tmp_path
     cues = source_cues(8)
     for cue in cues:
+        cue.confidence = 99
         cue.vi_text, cue.voice_duration, cue.tts_rate, cue.voice_audio_path = 'Reviewed', 1, '+30%', 'keep.wav'
     runner.save_cues('optimized_translation', cues)
     runner.save_state('optimized_translation', PipelineState(current_state=ProjectState.VERIFIED))
@@ -345,7 +367,9 @@ def test_database_write_failure_never_publishes_translation(tmp_path, db_session
     db_session.commit()
     runner = PipelineOrchestrator()
     runner.get_project_dir = lambda _: tmp_path
-    runner.save_cues('failed_publish', source_cues(1))
+    reviewed = source_cues(1)
+    reviewed[0].confidence = 99
+    runner.save_cues('failed_publish', reviewed)
     runner.save_state('failed_publish', PipelineState(current_state=ProjectState.SOURCE_REVIEWED))
     before = (tmp_path / 'transcript/cues.json').read_bytes()
     with patch('google.genai.Client') as factory, patch.object(runner, 'save_cues', side_effect=RuntimeError('DB refused write')):

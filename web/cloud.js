@@ -1,5 +1,6 @@
 /* Google Drive archive; API responses never include credentials/session URLs. */
 (() => {
+  if(window.workspaceOffline) return;
   const $ = id => document.getElementById(id);
   const modal = $('cloud-modal');
   let timer, loading = false, activeTask = null, lastOAuthMessage = null;
@@ -54,9 +55,9 @@
     finally { loading=false; }
   }
   async function action(fn) { try { await fn(); await load(); } catch(err) { message(err.message); } }
-  async function upload(project) {
+  async function upload(project, mode = $('cloud-mode').value) {
     if(!project) throw new Error('Hãy chọn video đã đạt QA kỹ thuật.');
-    const task=await API.request('POST',`/api/cloud/projects/${encodeURIComponent(project)}/upload`,{});
+    const task=await API.request('POST',`/api/cloud/projects/${encodeURIComponent(project)}/upload`,{mode});
     activeTask=task.task_id; message('Đã đưa vào hàng đợi. Bạn có thể đóng bảng, tác vụ vẫn chạy.');
   }
   $('btn-open-cloud').addEventListener('click',()=>{modal.style.display='flex';$('cloud-close').focus();load();clearInterval(timer);timer=setInterval(load,5000);});
@@ -99,7 +100,7 @@
   }));
   $('cloud-library').addEventListener('click',event=>{
     const button=event.target.closest('button'); if(!button) return;
-    if(button.dataset.cloudResume) action(()=>upload(button.dataset.cloudResume));
+    if(button.dataset.cloudResume) action(()=>upload(button.dataset.cloudResume, 'full_delivery'));
     if(button.dataset.cloudRemove && confirm('Xóa bản MP4 thành phẩm trên máy sau khi kiểm tra lại checksum và bản Google Drive? Giữ nguồn, phụ đề và cache.')) action(async()=>{
       const task=await API.request('POST',`/api/cloud/projects/${encodeURIComponent(button.dataset.project)}/remove-local/${encodeURIComponent(button.dataset.cloudRemove)}`,{});
       activeTask=task.task_id;

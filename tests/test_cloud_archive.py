@@ -65,6 +65,26 @@ class FakeDrive:
         return dict(id=remote,size=str(len(self.data)),md5Checksum=hashlib.md5(self.data).hexdigest(),trashed=False)
 
 
+def test_transient_upload_recovers_same_drive_session_without_duplicate_bytes(video, monkeypatch):
+    from src.cloud import resumable
+    fake = FakeDrive()
+    original = fake.send
+    lost = False
+    def send(session, total, offset=None, chunk=b''):
+        nonlocal lost
+        result = original(session, total, offset, chunk)
+        if offset is not None and not lost:
+            lost = True
+            raise drive.RetryableUploadError('response lost after acceptance')
+        return result
+    fake.send = send
+    monkeypatch.setattr(archive, 'Drive', lambda: fake)
+    monkeypatch.setattr(archive, 'CHUNK_SIZE', 256)
+    monkeypatch.setattr(resumable, '_wait', lambda seconds, check: check())
+    assert archive.upload('cloud_video')['status'] == 'VERIFIED'
+    assert fake.begin_calls == 1 and fake.data == video.read_bytes()
+
+
 def test_upload_resume_keeps_original_and_verifies_actual_bytes(video,monkeypatch):
     fake=FakeDrive()
     monkeypatch.setattr(archive,'Drive',lambda:fake)
@@ -224,7 +244,7 @@ def test_cloud_queue_failure_preserves_completed_pipeline_job(video,monkeypatch)
     def failed(*args,**kw): raise drive.CloudError('Cloud unavailable')
     monkeypatch.setattr(archive,'upload',failed)
     try:
-        response=TestClient(app).post('/api/cloud/projects/cloud_video/upload')
+        response=TestClient(app).post('/api/cloud/projects/cloud_video/upload',json={'mode':'full_delivery'})
         assert response.status_code==200
         task=local_queue.get(response.json()['task_id'])
         task.future.result(timeout=5)

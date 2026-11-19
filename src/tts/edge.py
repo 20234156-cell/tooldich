@@ -34,7 +34,7 @@ class EdgeTTSProvider(BaseTTSProvider):
     ]
 
     def list_voices(self) -> List[Dict[str, str]]:
-        return self.VOICES
+        return [] if settings.OFFLINE_MODE else self.VOICES
 
     async def _synthesize_async(
         self,
@@ -62,6 +62,8 @@ class EdgeTTSProvider(BaseTTSProvider):
         total_deadline_seconds: Optional[float] = None,
         boundary: str = 'SentenceBoundary',
     ) -> Tuple[bytes, float]:
+        if settings.OFFLINE_MODE:
+            raise RuntimeError('Edge TTS cần Internet. Chọn giọng VieNeu đã có trên máy hoặc xuất video chỉ có phụ đề.')
         v = voice or settings.EDGE_TTS_VOICE
         cleaned_text = (text or "").strip()
         # If text is empty or has no speakable letters/digits (e.g. '#', '...', '---'), return silence
@@ -105,6 +107,35 @@ class EdgeTTSProvider(BaseTTSProvider):
                 err_str = str(exc)
                 last_error = exc
                 if isinstance(exc, edge_tts.exceptions.NoAudioReceived):
+                    # In-situ fallback for NoAudioReceived: Microsoft Edge TTS intermittently drops audio
+                    # when given certain Vietnamese trailing punctuation combinations.
+                    fallback = re.sub(r'\.{2,}', ' ', cleaned_text).rstrip('.?!,;: ').strip()
+                    if fallback and fallback != cleaned_text:
+                        try:
+                            rem = deadline - time.monotonic()
+                            if rem > 0:
+                                while True:
+                                    if should_continue and not should_continue():
+                                        raise TaskCancelled('TTS cancelled waiting for network slot')
+                                    rem = deadline - time.monotonic()
+                                    if rem <= 0:
+                                        break
+                                    if _NETWORK_LIMITER.acquire(timeout=min(.1, rem)):
+                                        break
+                                try:
+                                    rem = deadline - time.monotonic()
+                                    if rem > 0:
+                                        tout = min(settings.TTS_REQUEST_TIMEOUT_SECONDS, rem)
+                                        if should_continue:
+                                            audio_bytes = asyncio.run(self._synthesize_cancellable(fallback, v, rate, pitch, should_continue, 'WordBoundary', tout))
+                                        else:
+                                            audio_bytes = asyncio.run(asyncio.wait_for(self._synthesize_async(fallback, v, rate, pitch, 'WordBoundary'), tout))
+                                finally:
+                                    _NETWORK_LIMITER.release()
+                        except Exception:
+                            pass
+                    if audio_bytes:
+                        break
                     boundary = 'WordBoundary' if boundary == 'SentenceBoundary' else 'SentenceBoundary'
                 if attempt + 1 >= max_attempts:
                     if "No audio was received" in err_str or "NoAudioReceived" in type(exc).__name__:

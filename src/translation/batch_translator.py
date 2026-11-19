@@ -13,12 +13,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.ai.key_pool import GeminiKeyPool, key_pool
 from config.settings import settings
-from src.jobs.logger import PipelineException, SystemErrorCodes, TaskCancelled, mask_secrets
+from src.jobs.logger import PipelineException, SystemErrorCodes, TaskCancelled, is_api_limit_error, mask_secrets
 from src.ocr.base import Cue, cues_to_srt
 from src.translation.memory import TranslationMemory, atomic_json
-from src.translation.quality import inspect_response
+from src.translation.quality import inspect_response, response_rows, salvage_repaired_translation
 from src.translation.glossary import prepare_glossary
-from src.translation.preflight import soft_budget, structure_findings
+from src.translation.preflight import soft_budget, structure_findings, speech_budgets
 from src.ai.usage import generate_logged, UsagePersistenceError
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,16 @@ TRANSLATION_SCHEMA = {
 class BatchTranslator:
     """Translates Hardsub cues in parallel batches with sliding context and key rotation."""
 
-    def __init__(self, pool: Optional[GeminiKeyPool] = None, batch_size: Optional[int] = None, model: Optional[str] = None):
+    def __init__(self, pool: Optional[GeminiKeyPool] = None, batch_size: Optional[int] = None, model: Optional[str] = None, speech_rate: str = "+0%", voice: Optional[str] = None):
+        from src.translation.preflight import voice_speech_rate
+        from src.tts.policy import rate_multiplier
+        self.voice = voice
+        self.speech_rate = speech_rate
+        if voice is not None:
+            self.speech_budget_rate = voice_speech_rate(voice, speech_rate)
+        else:
+            self.speech_budget_rate = max(3.6, min(5.2, 4.0 * rate_multiplier(speech_rate)))
+        self.external_deadline = None
         self.pool = pool or key_pool
         self.video_id = None
         self.batch_size = batch_size or settings.TRANSLATION_BATCH_SIZE
@@ -112,7 +121,15 @@ class BatchTranslator:
         self.warnings = []
         self.degraded = []
         self.repaired_ids = set()
+        self.skip_invalid = False
+        self.final_salvage = False
+        self.on_partial = None
+        self.salvaged_ids = set()
+        self.noise_ids = set()
+        self.skipped_ids = set()
         self._glossary_style = ''
+        self.fallback_providers = []
+        self.parallel_providers = False
 
     def _models_to_try(self):
         return list(dict.fromkeys([self.model]+[m.strip() for m in settings.TRANSLATION_FALLBACK_MODELS.split(',') if m.strip()]+[settings.TRANSLATION_REPAIR_MODEL]))
@@ -167,6 +184,12 @@ class BatchTranslator:
     def _build_batches(self, cues: List[Cue], tone: str, glossary=None):
         context = getattr(self, '_context_cues', cues)
         positions = {c.index: i for i, c in enumerate(context)}
+        budgets = speech_budgets(
+            context,
+            self.speech_budget_rate,
+            voice=getattr(self, 'voice', None),
+            speech_rate=getattr(self, 'speech_rate', None) if getattr(self, 'voice', None) else None,
+        )
         batches = []
         groups, current, characters = [], [], 0
         for cue in cues:
@@ -183,7 +206,10 @@ class BatchTranslator:
             payload = {
                 'context_before': [{'id': c.index, 'text': c.effective_source_text} for c in context[max(0, start_idx-4):start_idx]],
                 'to_translate': [{'id': c.index, 'text': c.effective_source_text, 'duration_seconds': round(c.duration, 3),
-                                  'speech_budget': soft_budget(c)} for c in batch],
+                                  'speech_budget': budgets[c.index],
+                                  **({'verified_lyrics': True,
+                                      'instruction': 'Dịch đủ lời nhạc cho phụ đề, không rút ngắn để đọc; không sửa nguồn đã đối chiếu.'}
+                                     if c.caption_role == 'background_lyrics' else {})} for c in batch],
                 'context_after': [{'id': c.index, 'text': c.effective_source_text} for c in context[end_idx:end_idx+2]],
                 'glossary': glossary or {}, 'shared_style': self._glossary_style,
                 'structure_findings': structure_findings(context[max(0, start_idx-1):end_idx])}
@@ -288,7 +314,6 @@ class BatchTranslator:
                     remaining = budget["deadline"] - time.monotonic()
                     if remaining <= 0 or budget["remaining"] <= 0:
                         break
-                    budget["remaining"] -= 1
                     if pinned or isinstance(self.pool, GeminiKeyPool):
                         self.pool.wait_translation_turn(key_info.id, budget['deadline'], should_continue, model_name)
                         remaining = budget['deadline'] - time.monotonic()
@@ -298,10 +323,16 @@ class BatchTranslator:
                             if pinned:
                                 raise KeyDeferred()
                             continue
+                    timeout = min(settings.GEMINI_TIMEOUT_SECONDS,
+                                  getattr(self,'request_timeout_seconds',settings.GEMINI_TIMEOUT_SECONDS),remaining)
+                    if getattr(self._worker,'splittable',False):
+                        # A multi-cue request can time out and split. Keep
+                        # time in the same deadline for the smaller requests.
+                        timeout = min(timeout,30.,remaining/2)
+                    budget["remaining"] -= 1
                     client = genai.Client(
                         api_key=key_info.key,
-                        http_options={"timeout": max(1, int(min(settings.GEMINI_TIMEOUT_SECONDS,
-                                      getattr(self, 'request_timeout_seconds', settings.GEMINI_TIMEOUT_SECONDS), remaining) * 1000)),
+                        http_options={"timeout": max(1, int(timeout * 1000)),
                                       "retry_options": {"attempts": 1}},
                     )
                     try:
@@ -331,6 +362,17 @@ class BatchTranslator:
                     except Exception as me:
                         model_err = me
                         m_err_str = mask_secrets(str(me)).replace(key_info.key,'***REDACTED***')
+                        if ('400' in m_err_str and 'Manually set deadline' in m_err_str
+                                and 'Minimum allowed' in m_err_str):
+                            # The split-reserve timeout can be below a model's
+                            # accepted minimum. Splitting lets a singleton use
+                            # the remaining parent budget without reserve.
+                            # Rotating keys cannot repair an invalid deadline.
+                            raise SplitBatch('Provider rejected remaining request deadline') from me
+                        if getattr(me, 'code', None) == 400 or re.search(r'\b400\s+INVALID_ARGUMENT\b', m_err_str):
+                            raise PipelineException(SystemErrorCodes.AI_ERROR,
+                                'Gemini từ chối yêu cầu dịch (HTTP 400). Kiểm tra model và cấu hình yêu cầu.',
+                                details={'provider_reason': 'invalid_request', 'http_status': 400}) from me
                         if pinned and (isinstance(me, TimeoutError) or re.search(r'504|timeout|timed out|deadline.exceeded', type(me).__name__ + ' ' + m_err_str, re.I)):
                             # A singleton cannot be split further. Still allow
                             # its configured next model within the SAME parent
@@ -354,6 +396,13 @@ class BatchTranslator:
                             self.pool.record_failure(key_info.id, 404, m_err_str, model=model_name)
                             last_error = m_err_str
                             continue
+                        transient = re.search(r'\b(500|502|503|504)\b', m_err_str)
+                        if transient:
+                            # A later successful fallback must not erase evidence
+                            # that this model is unavailable for the next batch.
+                            self.pool.record_failure(key_info.id, int(transient.group(1)), m_err_str, model=model_name)
+                            last_error = m_err_str
+                            continue
                         unscoped_error = True
                         if "429" in m_err_str or "quota" in m_err_str.lower() or "401" in m_err_str or "403" in m_err_str:
                             raise me
@@ -368,7 +417,7 @@ class BatchTranslator:
 
             except (TaskCancelled, UsagePersistenceError):
                 raise
-            except (KeyDeferred, SplitBatch):
+            except (KeyDeferred, SplitBatch, PipelineException):
                 raise
             except Exception as e:
                 elapsed_ms = (time.time() - t0) * 1000.0
@@ -392,7 +441,7 @@ class BatchTranslator:
                 time.sleep(min(0.5 * (attempt + 1), max(0, budget["deadline"] - time.monotonic())))
 
         raise PipelineException(
-            SystemErrorCodes.AI_ERROR,
+            SystemErrorCodes.RATE_LIMIT_EXCEEDED if is_api_limit_error(SystemErrorCodes.AI_ERROR, last_error or '') else SystemErrorCodes.AI_ERROR,
             f"Dịch Gemini hết ngân sách lượt thử hoặc deadline: {last_error}",
         )
 
@@ -407,6 +456,7 @@ class BatchTranslator:
         context_cues: Optional[List[Cue]] = None,
     ) -> List[Cue]:
         """Translate all cues in batches with sliding context."""
+        self.skipped_ids = set()
         if not cues:
             return []
 
@@ -422,8 +472,15 @@ class BatchTranslator:
         if progress_callback:
             progress_callback(0, 'Chuẩn bị glossary và bộ nhớ dịch')
         glossary = self._prepare_glossary(self._context_cues, output_dir, tone, should_continue)
-        self.memory = TranslationMemory(output_dir, self._context_cues, tone,
-            {'terms': glossary, 'style': self._glossary_style}, self._models_to_try(), settings.TRANSLATION_MAX_TOKENS)
+        memory_context = {'terms': glossary, 'style': self._glossary_style}
+        if getattr(self, 'voice', None):
+            memory_context['voice_profile'] = self.voice
+        if self.fallback_providers:
+            memory_context['fallback_versions'] = {provider.name: provider.version
+                                                   for provider in self.fallback_providers}
+        self.memory = TranslationMemory(output_dir, self._context_cues, tone, memory_context,
+            self._models_to_try() + [provider.name for provider in self.fallback_providers],
+            settings.TRANSLATION_MAX_TOKENS, speech_budget_rate=self.speech_budget_rate)
         representatives, identities, aliases = [], {}, {}
         for cue in cues:
             identity = self.memory.entries[cue.index]
@@ -432,6 +489,20 @@ class BatchTranslator:
                 representatives.append(cue)
             aliases[cue.index] = identities[identity]
         batches = self._build_batches(representatives,tone,glossary)
+        gemini_batches = list(batches)
+        provider_batches = []
+        if self.parallel_providers and len(representatives) >= 20:
+            limits = {'local_hymt': 4, 'azure_translator': 16}
+            for provider in self.fallback_providers:
+                limit = limits.get(provider.name)
+                if not limit or not gemini_batches:
+                    continue
+                info = gemini_batches.pop()
+                while len(info[1]) > limit:
+                    left, info = self._split_batch(info)
+                    gemini_batches.append(left)
+                provider_batches.append((provider, info))
+            batches = gemini_batches + [info for _, info in provider_batches]
         repair_required = set()
         num_batches = len(batches)
         abort=threading.Event()
@@ -439,6 +510,42 @@ class BatchTranslator:
             return not abort.is_set() and (should_continue is None or should_continue())
 
         budgets = {}
+        def recover_batch(batch_info, providers):
+            import requests
+
+            batch_index, batch, _ = batch_info
+            resolved = {}
+            for cue in batch:
+                cached = self.memory.read(cue.index, parse_translation_response)
+                if cached:
+                    row, model, version = cached
+                    valid, _ = inspect_response(json.dumps([row]), [cue], parse_translation_response)
+                    resolved.update(valid)
+                    if valid:
+                        self._register_model(model, version)
+            for provider in providers:
+                missing = [cue.model_copy(update={'vi_text': None}, deep=True)
+                           for cue in batch if cue.index not in resolved]
+                if not missing:
+                    break
+                if not continue_translation():
+                    raise TaskCancelled()
+                try:
+                    provider.translate_cues(missing, output_dir=output_dir, should_continue=continue_translation)
+                except (requests.RequestException, ValueError, KeyError, TypeError, PipelineException):
+                    logger.warning('Translation fallback %s could not complete batch %s', provider.name, batch_index)
+                for cue in missing:
+                    if not cue.vi_text:
+                        continue
+                    payload = json.dumps([{'id': cue.index, 'translated': cue.vi_text}])
+                    valid, _ = inspect_response(payload, [cue], parse_translation_response)
+                    if not valid:
+                        continue
+                    self.memory.write(cue.index, valid[cue.index], provider.name, provider.version)
+                    resolved.update(valid)
+                    self._register_model(provider.name, provider.version)
+            return batch_index, resolved
+
         def translate_batch(batch_info, budget=None):
             b_idx, batch, prompt = batch_info
             if not continue_translation():
@@ -465,10 +572,26 @@ class BatchTranslator:
                         trans_map.update(valid)
                         self._register_model(model, version)
             last_error = None
+            salvage_candidates = {}
             if budget is None:
                 budget = budgets.setdefault(b_idx, {"deadline": time.monotonic() + settings.GEMINI_TOTAL_DEADLINE_SECONDS, "remaining": 12})
-            if time.monotonic() >= budget['deadline'] or budget['remaining'] <= 0:
-                raise PipelineException(SystemErrorCodes.AI_ERROR, 'Translation batch retry budget/deadline exhausted')
+            if self.external_deadline is not None:
+                budget['deadline'] = min(budget['deadline'], self.external_deadline)
+            if set(trans_map) != expected and (time.monotonic() >= budget['deadline'] or budget['remaining'] <= 0):
+                valid_keys = [key for key in keys if key.status != 'invalid']
+                models = self._models_to_try()
+                if valid_keys and all(
+                    is_api_limit_error(SystemErrorCodes.AI_ERROR, key.last_error or '')
+                    and not any(key.is_usable(model) for model in models)
+                    for key in valid_keys
+                ):
+                    raise PipelineException(SystemErrorCodes.RATE_LIMIT_EXCEEDED,
+                                            'Gemini đã hết hạn mức cho lượt xử lý này.')
+                pending_ids = sorted(expected - set(trans_map))
+                reason = 'deadline' if time.monotonic() >= budget['deadline'] else 'request_limit'
+                raise PipelineException(SystemErrorCodes.AI_ERROR,
+                    f'Gemini chưa dịch xong {len(pending_ids)} câu trong ngân sách của nhóm. Có thể tiếp tục từ bản dịch đã lưu.',
+                    details={'cue_indices':pending_ids,'batch_path':b_idx,'provider_reason':reason})
             for attempt in range(3):
                 if not continue_translation():
                     raise TaskCancelled()
@@ -481,21 +604,48 @@ class BatchTranslator:
                     retry_prompt += '\nPhản hồi trước sai cấu trúc. Chỉ trả MỘT mảng JSON hoàn chỉnh, đúng ID trong to_translate, không thêm giải thích hoặc JSON thứ hai.'
                 previous_models = getattr(self._worker, 'models', None)
                 previous_singleton = getattr(self._worker, 'singleton', False)
+                previous_splittable = getattr(self._worker, 'splittable', False)
                 self._worker.singleton = len(pending_cues) == 1
-                self._worker.models = [settings.TRANSLATION_REPAIR_MODEL] if pending_ids.issubset(repair_required) else None
+                self._worker.splittable = len(pending_cues) > 1
+                self._worker.models = list(dict.fromkeys(
+                    [settings.TRANSLATION_REPAIR_MODEL, *self._models_to_try()]
+                )) if pending_ids.issubset(repair_required) else None
                 try:
                     try:
                         raw_resp = self._call_gemini_with_rotation(retry_prompt, budget=budget, should_continue=continue_translation)
                     finally:
                         self._worker.models = previous_models
                         self._worker.singleton = previous_singleton
-                except SplitBatch:
+                        self._worker.splittable = previous_splittable
+                except SplitBatch as exc:
                     if len(pending_cues) <= 1:
-                        raise PipelineException(SystemErrorCodes.AI_ERROR, 'Single-cue translation timed out or exceeded token limit')
+                        if self.skip_invalid and str(exc) == 'MAX_TOKENS':
+                            last_error = exc
+                            repair_required.update(pending_ids)
+                            if time.monotonic() >= budget['deadline'] or budget['remaining'] <= 0:
+                                break
+                            continue
+                        cue_id = pending_cues[0].index
+                        message = (f'Dịch câu #{cue_id} vượt giới hạn token của dịch vụ.'
+                                   if str(exc) == 'MAX_TOKENS'
+                                   else f'Dịch câu #{cue_id} hết thời gian chờ phản hồi từ dịch vụ. Có thể tiếp tục bằng kết quả dịch đã lưu khớp dữ liệu.')
+                        raise PipelineException(SystemErrorCodes.AI_ERROR, message,
+                            details={'cue_indices': [cue_id], 'provider_reason': str(exc)}) from exc
                     for child_info in self._split_batch((b_idx, pending_cues, retry_prompt)):
                         _, child_map = translate_batch(child_info, budget)
                         trans_map.update(child_map)
                     break
+                if output_dir and self.final_salvage:
+                    atomic_json(output_dir/'translation_attempts'/(str(b_idx).replace(' ', '')+f'_{attempt}.json'),
+                                dict(cue_ids=sorted(pending_ids), response=str(raw_resp),
+                                     model=getattr(raw_resp, 'model', self.model)))
+                try:
+                    for candidate in response_rows(raw_resp):
+                        if (isinstance(candidate, dict) and type(candidate.get('id')) is int
+                                and candidate['id'] in pending_ids):
+                            salvage_candidates[candidate['id']] = candidate
+                except (ValueError, TypeError):
+                    pass
                 try:
                     valid, issues = inspect_response(raw_resp, pending_cues, parse_translation_response)
                 except (TypeError, ValueError) as exc:
@@ -512,11 +662,52 @@ class BatchTranslator:
                         with self._provenance_lock:
                             self.repaired_ids.add(cue_id)
                 trans_map.update(valid)
+                if valid and self.on_partial:
+                    self.on_partial(valid)
                 repair_required.update(issues)
                 last_error = ValueError(str(issues)) if issues else None
                 if set(trans_map) == expected:
                     break
+            if set(trans_map) != expected and self.final_salvage:
+                minimal = {'是': 'Đúng.', '不': 'Không.', '没': 'Chưa.', '嗯': 'Ừ.',
+                           '啊': 'À.', '哦': 'Ồ.', '好': 'Được.', '哈哈': 'Ha ha.'}
+                for cue in batch:
+                    if cue.index in trans_map:
+                        continue
+                    candidate = salvage_candidates.get(cue.index, {})
+                    translated = salvage_repaired_translation(candidate.get('translated', candidate.get('text')))
+                    reason = 'salvage_repaired_translation'
+                    if not translated:
+                        reason = 'single_cue_minimal_fallback'
+                        try:
+                            isolated = self._call_gemini_with_rotation(
+                                self._restrict_prompt(prompt, {cue.index}) +
+                                '\nDịch riêng câu này thành một câu Việt ngắn có nghĩa, JSON đúng id/text.',
+                                budget=budget, should_continue=continue_translation)
+                            isolated_rows = response_rows(isolated)
+                            if len(isolated_rows) == 1 and isolated_rows[0].get('id') == cue.index:
+                                translated = salvage_repaired_translation(isolated_rows[0].get('text',
+                                                                      isolated_rows[0].get('translated')))
+                                self._register_model(getattr(isolated, 'model', self.model),
+                                                     getattr(isolated, 'model_version', self.model))
+                        except (ValueError, TypeError, PipelineException):
+                            pass
+                        translated = translated or minimal.get(cue.effective_source_text.strip())
+                    if translated:
+                        row = dict(id=cue.index, translated=translated, salvage_reason=reason)
+                        trans_map[cue.index] = row
+                        self.salvaged_ids.add(cue.index)
+                        self.memory.write(cue.index, row, self.model, self.used_models.get(self.model, self.model))
+                        if self.on_partial:
+                            self.on_partial({cue.index: row})
+                        self.warnings.append(f'Cue #{cue.index}: {reason}; cần kiểm nghĩa bản dịch.')
+                    elif not re.search(r'[\u3400-\u9fff]|[A-Za-zÀ-ỹ]{3,}', cue.effective_source_text):
+                        self.noise_ids.add(cue.index)
+                if self.noise_ids & expected:
+                    return b_idx, trans_map
             if set(trans_map) != expected:
+                if self.skip_invalid:
+                    return b_idx, trans_map
                 raise PipelineException(SystemErrorCodes.INVALID_TRANSLATION_RESPONSE,
                     f'Phản hồi dịch batch {b_idx} vẫn không hợp lệ sau 3 lượt: {last_error}') from last_error
             if cache_file:
@@ -540,13 +731,37 @@ class BatchTranslator:
         completed = 0
         results: Dict[int, Dict[int, Dict[str, Any]]] = {}
         work_queue = queue.Queue()
-        for info in batches:
+        first_provider = {info[0]: provider for provider, info in provider_batches}
+        for info in gemini_batches:
             work_queue.put(info)
         results_lock = threading.Lock()
         failures = []
 
-        def worker(key):
+        def complete_batch(batch_index, mapped):
             nonlocal completed
+            with results_lock:
+                if self.on_partial and mapped:
+                    self.on_partial(mapped)
+                results[batch_index] = mapped
+                completed += 1
+                if progress_callback:
+                    progress_callback(int(completed/num_batches*100), f'Dich batch ({completed}/{num_batches})')
+
+        def provider_worker(provider, info):
+            try:
+                batch_index, mapped = recover_batch(info, [provider])
+                if len(mapped) == len(info[1]):
+                    complete_batch(batch_index, mapped)
+                else:
+                    work_queue.put(info)
+            except Exception as exc:
+                with results_lock:
+                    if not failures:
+                        failures.append(exc)
+                abort.set()
+                raise
+
+        def worker(key):
             self._worker.key = key
             try:
                 while continue_translation():
@@ -559,6 +774,15 @@ class BatchTranslator:
                         continue
                     try:
                         batch_index, mapped = translate_batch(info)
+                    except PipelineException as exc:
+                        if not self.fallback_providers or exc.code not in {
+                                SystemErrorCodes.AI_ERROR, SystemErrorCodes.RATE_LIMIT_EXCEEDED}:
+                            raise
+                        remaining_providers = [provider for provider in self.fallback_providers
+                                               if provider is not first_provider.get(info[0])]
+                        batch_index, mapped = recover_batch(info, remaining_providers)
+                        if len(mapped) != len(info[1]):
+                            raise
                     except KeyDeferred:
                         work_queue.put(info)
                         if key and key.status == 'invalid' and all(k.status == 'invalid' for k in keys):
@@ -567,11 +791,7 @@ class BatchTranslator:
                         continue
                     finally:
                         work_queue.task_done()
-                    with results_lock:
-                        results[batch_index] = mapped
-                        completed += 1
-                        if progress_callback:
-                            progress_callback(int(completed/num_batches*100), f'Dich batch ({completed}/{num_batches})')
+                    complete_batch(batch_index, mapped)
                 raise TaskCancelled()
             except Exception as exc:
                 with results_lock:
@@ -582,8 +802,9 @@ class BatchTranslator:
             finally:
                 self._worker.key = None
 
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="translate") as pool:
+        with ThreadPoolExecutor(max_workers=workers + len(provider_batches), thread_name_prefix="translate") as pool:
             pending = {pool.submit(worker, keys[i] if keys else None) for i in range(workers)}
+            pending.update(pool.submit(provider_worker, provider, info) for provider, info in provider_batches)
             try:
                 while pending:
                     if abort.is_set():
@@ -602,22 +823,41 @@ class BatchTranslator:
                 raise
 
         merged_results = {cue_id: row for batch_index, _, _ in batches for cue_id, row in results[batch_index].items()}
+        used_fallback = [provider.name for provider in self.fallback_providers if provider.name in self.used_models]
+        if used_fallback:
+            self.warnings.append('Đã dùng nguồn dịch bổ sung: ' + ', '.join(used_fallback) + '. Cần kiểm nghĩa.')
+            self.degraded.append('translation_provider_fallback')
         if self.repaired_ids:
             self.warnings.append(f'Đã dịch lại riêng {len(self.repaired_ids)} cue bị kiểm tra tự động đánh dấu lỗi; vẫn cần duyệt ý nghĩa.')
         for cue in cues:
+            if aliases[cue.index] not in merged_results:
+                if cue.index not in self.noise_ids and not self.skip_invalid:
+                    raise PipelineException(SystemErrorCodes.INVALID_TRANSLATION_RESPONSE,
+                                            f'Thiếu bản dịch cue {cue.index}.')
+                self.skipped_ids.add(cue.index)
+                continue
             item = merged_results[aliases[cue.index]]
             translated = str(item.get("translated", "")).strip()
             corrected = str(item.get("source_corrected", "")).strip()
+            if not translated and self.skip_invalid:
+                self.skipped_ids.add(cue.index)
+                continue
 
             has_chinese_source = bool(re.search(r"[\u3400-\u9fff]", cue.text))
             has_chinese_trans = bool(re.search(r"[\u3400-\u9fff]", translated))
 
             if has_chinese_trans:
+                if self.skip_invalid:
+                    self.skipped_ids.add(cue.index)
+                    continue
                 raise PipelineException(
                     SystemErrorCodes.INVALID_TRANSLATION_RESPONSE,
                     f"Cue {cue.index} chứa chữ Hán chưa được dịch sang tiếng Việt: '{translated}'.",
                 )
             if has_chinese_source and translated == cue.text:
+                if self.skip_invalid:
+                    self.skipped_ids.add(cue.index)
+                    continue
                 raise PipelineException(
                     SystemErrorCodes.INVALID_TRANSLATION_RESPONSE,
                     f"Cue {cue.index} không được dịch (vẫn giữ nguyên câu tiếng Trung).",
@@ -627,6 +867,9 @@ class BatchTranslator:
                 translated = corrected or (cue.text if not has_chinese_source else "...")
 
             cue.vi_text = translated
+            if item.get('salvage_reason'):
+                cue.is_approved = True
+                self.salvaged_ids.add(cue.index)
             if corrected and not cue.corrected_text and corrected!=cue.text:
                 cue.corrected_text = corrected
                 self.source_corrections.add(cue.index)

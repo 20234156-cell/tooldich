@@ -1,3 +1,4 @@
+from src.jobs.logger import PipelineException
 """Core contract tests: One-pass Render & Quality Verification (File 7/8).
 
 Contracts:
@@ -16,7 +17,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.ocr.base import Cue
-from src.pipeline.roi import ROIBox
+from src.pipeline.roi import ManualMask, ROIBox
 from src.pipeline.render import (
     RenderConfig,
     build_filter_graphs,
@@ -24,6 +25,71 @@ from src.pipeline.render import (
     render_one_pass,
 )
 from src.pipeline.verify import verify_project_output, VerificationReport
+
+
+def test_manual_blur_and_brand_work_without_detected_logo(tmp_path):
+    roi = ROIBox(x=.1, y=.8, width=.8, height=.1)
+    cfg = RenderConfig(style='bilingual', manual_blur=[ManualMask(x=.1,y=.1,width=.2,height=.1)], brand_position='top_right')
+    graph, _ = build_filter_graphs(1920, 1080, roi, tmp_path/'sub.ass', cfg, False, False)
+    assert 'crop=384:108:192:108' in graph
+    assert 'overlay=x=192:y=108[tracked0]' in graph
+    assert 'scale=60:60' in graph
+    assert 'alpha(X,Y)*clip(' in graph
+    assert 'overlay=x=1812:y=27[v_out]' in graph
+
+
+def test_manual_delogo_survives_auto_payload_and_clamps_at_edge(tmp_path):
+    from src.api.schemas import RunAllRequest
+
+    payload = RunAllRequest(manual_blur=[dict(x=0, y=0, width=.2, height=.1, method='delogo')])
+    cfg = RenderConfig(style='bilingual', manual_blur=payload.manual_blur)
+    graph, _ = build_filter_graphs(1920, 1080, ROIBox(x=.1,y=.8,width=.8,height=.1),
+                                  tmp_path/'sub.ass', cfg, False, False)
+    assert graph.startswith('[0:v]delogo=x=1:y=1:')
+
+
+@pytest.mark.parametrize('mode', ['blur', 'remove', 'npzzsub'])
+def test_corner_logo_filter_precedes_subtitles(tmp_path, mode):
+    from src.video.cleanup import MaskBox
+
+    corner = MaskBox(x=1502, y=33, w=384, h=67, method='blur' if mode == 'blur' else 'delogo')
+    roi = ROIBox(x=.1, y=.8, width=.8, height=.1)
+    graph, _ = build_filter_graphs(1920, 1080, roi, tmp_path / 'sub.ass',
+                                  RenderConfig(corner_logo=mode), False, False, corner_box=corner)
+    if mode == 'blur':
+        assert graph.startswith('[0:v]split') and 'boxblur=' in graph
+    else:
+        assert graph.startswith('[0:v]delogo=x=1502:y=33:w=384:h=67[corner_clean];')
+    assert ('npzzsub-wordmark.png' in graph) == (mode == 'npzzsub')
+    if mode == 'npzzsub':
+        assert 'scale=60:60' in graph
+        assert 'alpha(X,Y)*clip(' in graph
+        assert 'overlay=x=1826:y=33[v_out]' in graph
+    assert graph.endswith('[v_out]')
+
+
+def test_corner_logo_rejects_wide_static_banner():
+    import numpy as np
+    from src.video.overlay_detector import OverlayDetector
+
+    frames = np.zeros((8, 200, 400), dtype=np.uint8)
+    frames[:, 4:12, 230:398:2] = 255
+    detector = OverlayDetector()
+    assert detector.detect_watermark(frames > 190, frames) is not None
+    assert detector.detect_watermark(frames > 190, frames, max_width_ratio=.28) is None
+
+
+def test_douyin_timed_corner_masks_and_independent_brand(tmp_path):
+    from src.video.cleanup import MaskBox
+
+    tracks = [(MaskBox(x=60, y=30, w=140, h=40, method='blur'), [[0, 3]]),
+              (MaskBox(x=1680, y=995, w=130, h=40, method='blur'), [[90, 93]])]
+    graph, _ = build_filter_graphs(1920, 1080, ROIBox(x=.1,y=.8,width=.8,height=.1),
+                                  tmp_path/'sub.ass', RenderConfig(corner_logo='npzzsub'),
+                                  False, False, corner_tracks=tracks)
+    assert "enable='between(t,0.000,3.000)'[tracked0];[tracked0]split" in graph
+    assert "enable='between(t,90.000,93.000)'[tracked1]" in graph
+    assert 'overlay=x=48:y=113[v_out]' in graph
 
 
 def write_test_voice(path, silent=False):
@@ -139,8 +205,9 @@ def test_pipeline_preview_supplies_separate_source_and_fitted_cues(tmp_path):
     assert render.call_args.kwargs['source_cues'][0].start == 1
 
 
+@pytest.mark.parametrize('preset', ['p4', 'compact'])
 @pytest.mark.parametrize('resume_qc', [False, True])
-def test_render_one_pass_atomic_replacement(tmp_path, resume_qc):
+def test_render_one_pass_atomic_replacement(tmp_path, resume_qc, preset):
     """Verify render_one_pass creates .tmp.mp4 and atomically replaces target on success."""
     dummy_src = tmp_path / "source.mp4"
     dummy_src.write_bytes(b"dummy source video")
@@ -150,7 +217,7 @@ def test_render_one_pass_atomic_replacement(tmp_path, resume_qc):
 
     roi = ROIBox(x=0.1, y=0.8, width=0.8, height=0.15)
     cues = [Cue(index=1, start=0.0, end=2.0, vi_text="Xin chào")]
-    cfg = RenderConfig()
+    cfg = RenderConfig(encoder_preset=preset)
 
     mock_probe_data = {
         "streams": [
@@ -187,11 +254,12 @@ def test_render_one_pass_atomic_replacement(tmp_path, resume_qc):
     with patch("subprocess.run", side_effect=mock_subprocess_run), \
          patch("subprocess.Popen", side_effect=mock_popen) as encode, \
          patch("src.pipeline.render.nvenc_available", return_value=True), \
-         patch("src.pipeline.audio_qc.master_delivery", return_value={"passed": True}) as qc:
+         patch("src.pipeline.audio_qc.master_delivery", return_value={"passed": True}), \
+         patch("src.pipeline.audio_qc.measure_audio", return_value=dict(integrated_lufs=-14., true_peak_dbtp=-2.)) as qc:
 
         if resume_qc:
             qc.side_effect = ValueError('Audio QC failed')
-            with pytest.raises(ValueError, match='Audio QC'):
+            with pytest.raises(PipelineException, match='Audio QC'):
                 render_one_pass(dummy_src, dummy_voice, roi, cues, dest_path, cfg,
                                 progress_callback=lambda pct, stage: progress_updates.append((pct, stage)))
             assert dest_path.with_suffix('.encode.json').is_file()
@@ -213,6 +281,12 @@ def test_render_one_pass_atomic_replacement(tmp_path, resume_qc):
         assert res.duration == 10.0
         assert res.used_encoder == "h264_nvenc"
         assert encode.call_count == 1
+        if preset == 'compact':
+            command = encode.call_args.args[0]
+            assert command[command.index('-preset')+1] == 'p5'
+            assert command[command.index('-cq')+1] == '23'
+            assert command[command.index('-maxrate')+1] == '4500k'
+            assert command[command.index('-bufsize')+1] == '9000k' 
     assert any(50 <= pct < 90 for pct, _ in progress_updates)
     assert progress_updates[-1][0] == 100
 
@@ -241,13 +315,19 @@ def test_verify_project_output(tmp_path):
     transcript_dir = tmp_path / "transcript"
     transcript_dir.mkdir(parents=True)
     write_test_voice(tmp_path / 'clip_1.wav')
-    cues = [{"index": 1, "start": 0, "end": 2, "vi_text": "Xin chào", "voice_audio_path": "clip_1.wav"}]
+    cues = [{"index": 1, "start": 0, "end": 2, "text": "你好", "confidence": 99, "vi_text": "Xin chào", "voice_audio_path": "clip_1.wav"}]
     (transcript_dir / "cues.json").write_text(json.dumps(cues), encoding="utf-8")
 
     vo_dir = tmp_path / "voiceover"
     vo_dir.mkdir(parents=True)
-    timeline = [{"cue_index": 1, "drift": 0.12, "actual_start": 0.12, "actual_end": 2.12}]
+    timeline = [{"cue_index": 1, "drift": 0.12, "actual_start": 0.12, "actual_end": 2.12,
+                 "synthesis_rate": "+15%", "tempo": 1.1}]
     (vo_dir / "timeline.json").write_text(json.dumps(timeline), encoding="utf-8")
+    (tmp_path/'audit').mkdir()
+    (tmp_path/'audit/meaning_review.json').write_text(json.dumps({'current': [
+        {'cue_id': 1, 'strong_shortening': True, 'candidate': 'Xin chào', 'source': '你好'},
+        {'cue_id': 1, 'strong_shortening': True, 'candidate': 'Bản cũ', 'source': '你好'},
+    ]}, ensure_ascii=False), encoding='utf-8')
 
     mock_probe = {
         "streams": [{"codec_type": "video"}, {"codec_type": "audio"}],
@@ -263,6 +343,13 @@ def test_verify_project_output(tmp_path):
         assert report.duration_diff == 0.0
         assert report.max_drift == 0.12
         assert 'audio_qc_unverified' in report.degraded
+        data = report.to_dict()
+        assert data['content_review_status'] == 'needs_review'
+        assert data['fully_passed'] is False
+        assert [item['reason'] for item in data['content_review_items']] == [
+            'fast_voice', 'strong_shortening', 'voice_outside_caption']
+        assert data['content_review_items'][0]['speed'] == 1.265
+        assert data['content_review_items'][2]['actual_end'] == 2.12
 
 
 @pytest.mark.parametrize('failure', ['corrupt_voice', 'silent_voice', 'excess_speed'])
@@ -281,7 +368,7 @@ def test_qa_checks_decoded_voice_and_combined_speed(tmp_path, failure):
     (tmp_path/'voiceover').mkdir()
     (tmp_path/'voiceover/timeline.json').write_text(json.dumps(timeline))
     probe = {'streams':[{'codec_type':'video'},{'codec_type':'audio'}], 'format':{'duration':'2'}}
-    with patch('src.pipeline.verify.subprocess.run', return_value=MagicMock(stdout=json.dumps(probe))):
+    with patch('src.jobs.resources.subprocess.run', return_value=MagicMock(stdout=json.dumps(probe))):
         report = verify_project_output(tmp_path, source, output, cues_data=cues)
     assert not report.passed, report.to_dict()
 
@@ -382,6 +469,9 @@ def test_real_render_reads_filter_script_and_handles_apostrophe_path(tmp_path):
     assert output.stat().st_size > 0
     assert abs(result.duration-2) <= .1
     assert (output.parent/'video_vi.filter.txt').is_file()
+    from src.pipeline.audio_qc import cached_delivery_measurement
+    qc = json.loads((output.parent/'audio_qc.json').read_text(encoding='utf-8'))
+    assert cached_delivery_measurement(output, qc) == qc['after']
 
 
 def test_long_film_ducking_expression_loads_in_real_ffmpeg(tmp_path):

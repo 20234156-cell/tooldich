@@ -109,6 +109,7 @@ def start():
                     expires_at=time.time()+int(tokens.get('expires_in',3600)),
                     account_id=user['permissionId'],email=user.get('emailAddress'),display_name=user.get('displayName'),
                     folder_id=current.get('folder_id') if same_account else None,
+                    project_folders=current.get('project_folders',{}) if same_account else {},
                     auto_upload=current.get('auto_upload',False) if same_account else False))
                 _message = 'Đã kết nối Google Drive.'
         except Exception:

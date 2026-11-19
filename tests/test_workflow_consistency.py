@@ -25,6 +25,7 @@ def test_actual_manual_and_run_all_js_submit_identical_voice_settings():
     helper = ''
     if 'function readVoiceSettings()' in source:
         helper = source[source.index('function readVoiceSettings()'):source.index('async function runVoiceoverTask(')]
+    helper += source[source.index('function readWorkflowOptions('):source.index('function updateWorkflowControls(')]
     script = '''
 let handler; const sent=[]; const currentProjectId='project';
 const window={dispatchEvent(){}};const CustomEvent=function(){};

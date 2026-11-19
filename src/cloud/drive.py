@@ -4,6 +4,8 @@ Only fixed Google endpoints are used. Provider errors never include response bod
 or request URLs, which may contain upload credentials.
 """
 import base64
+import os
+from config.settings import settings
 import json
 import re
 import sys
@@ -31,6 +33,13 @@ def require_idle():
 
 class CloudError(RuntimeError):
     pass
+
+
+class RetryableUploadError(CloudError):
+    """Ambiguous transport/server failure; query the session before resending."""
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class ExpiredSession(CloudError):
@@ -81,14 +90,25 @@ def configure(document):
             save_config(dict(client_id=client_id, client_secret=secret, auto_upload=False))
 
 
+def network_allowed():
+    return not settings.OFFLINE_MODE and 'pytest' not in sys.modules and not os.environ.get('PYTEST_CURRENT_TEST')
+
+
+def require_online():
+    if settings.OFFLINE_MODE:
+        raise CloudError('Cloud đã tắt trong chế độ offline.')
+
+
 def request(method, url, **kwargs):
+    if not network_allowed():
+        raise CloudError('Kết nối cloud đã được cô lập (offline/kiểm thử).')
     parsed = urlsplit(url)
     if parsed.scheme != 'https' or parsed.netloc not in {'www.googleapis.com','oauth2.googleapis.com'}:
         raise CloudError('Địa chỉ Google không hợp lệ.')
     try:
         return requests.request(method, url, timeout=(10, 90), allow_redirects=False, **kwargs)
     except requests.RequestException:
-        raise CloudError('Kết nối Google bị gián đoạn. Bấm tải lại để tiếp tục an toàn.') from None
+        raise RetryableUploadError('Kết nối Google bị gián đoạn. Phiên tải được giữ để tiếp tục.') from None
 
 
 def checked(method, url, expected=(200,), **kwargs):
@@ -170,10 +190,28 @@ class Drive:
                 json={'id':folder,'name':'DuanLayLink - ThanhPham','mimeType':'application/vnd.google-apps.folder'})
             return folder
 
+    def project_folder(self, project_id):
+        with LOCK:
+            cfg=config(); folders=cfg.setdefault('project_folders',{})
+            if project_id not in folders:
+                folders[project_id]=self.new_id();save_config(cfg)
+            identifier=valid_id(folders[project_id]);parent=self.folder()
+            with request('GET',API+'/files/'+identifier,headers=self.headers,
+                         params={'fields':'id,mimeType,trashed,parents'}) as response:
+                if response.status_code==200:
+                    data=response.json()
+                    if data.get('trashed') or data.get('mimeType')!='application/vnd.google-apps.folder' or parent not in data.get('parents',[]):
+                        raise CloudError('Thư mục hồ sơ Drive đã đổi hoặc bị xóa; hãy kiểm tra kết nối.')
+                    return identifier
+                if response.status_code!=404:raise CloudError('Không kiểm tra được thư mục hồ sơ Drive.')
+            checked('POST',API+'/files',headers=self.headers,expected=(200,201),
+                json={'id':identifier,'name':project_id,'mimeType':'application/vnd.google-apps.folder','parents':[parent]})
+            return identifier
+
     def begin(self, row):
         headers = self.headers | {'X-Upload-Content-Type':getattr(row,'content_type','video/mp4'),'X-Upload-Content-Length':str(row.file_size)}
         with request('POST', UPLOAD, headers=headers, params={'uploadType':'resumable'},
-            json={'id':row.remote_id,'name':getattr(row,'filename',f'{row.project_id}-{row.sha256[:12]}.mp4'),'parents':[self.folder()],
+            json={'id':row.remote_id,'name':getattr(row,'filename',f'{row.project_id}-{row.sha256[:12]}.mp4'),'parents':[getattr(row,'parent_id',None) or self.folder()],
                   'appProperties':{'archive_id':row.id,'sha256':row.sha256}}) as response:
             if response.status_code not in (200,201):
                 raise CloudError(f'Không tạo được upload Drive (HTTP {response.status_code}).')
@@ -193,6 +231,9 @@ class Drive:
             'Content-Range':f'bytes {offset}-{offset+len(chunk)-1}/{total}' if offset is not None else f'bytes */{total}'}
         with request('PUT', session, headers=headers, data=chunk) as response:
             status = response.status_code
+            if status in (429, 500, 502, 503, 504):
+                raise RetryableUploadError(f'Drive tạm thời chưa nhận được dữ liệu (HTTP {status}).',
+                                           response.headers.get('Retry-After'))
             if status in (404,410):
                 raise ExpiredSession('Phiên tải đã hết hạn.')
             if status in (200,201):

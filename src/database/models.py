@@ -20,12 +20,33 @@ class Base(DeclarativeBase):
     pass
 
 
+class CueReviewRevision(Base):
+    """Transactional source-edit history and durable JSONL outbox; survives deletion."""
+    __tablename__ = 'cue_review_revisions'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict] = mapped_column(JSON)
+    exported: Mapped[bool] = mapped_column(Boolean, default=False)
+    export_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class ServerRecord(Base):
     """Additive server-control schema; no changes to authoritative project tables."""
     __tablename__ = 'server_records'
     key: Mapped[str] = mapped_column(String(160), primary_key=True)
     data: Mapped[dict] = mapped_column(JSON, default=dict)
     updated_at: Mapped[float] = mapped_column(Float, default=0)
+
+
+class PipelineObservation(Base):
+    """Selective durable stage observations, not verified training labels."""
+    __tablename__ = 'pipeline_observations'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(64), index=True)
+    stage: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[float] = mapped_column(Float, index=True)
+    payload: Mapped[dict] = mapped_column(JSON)
 
 
 class JobStatus(str, enum.Enum):

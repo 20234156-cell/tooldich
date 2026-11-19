@@ -8,6 +8,8 @@ import math
 import re
 import shutil
 import subprocess
+from src.jobs.resources import media_timeout
+import contextvars
 import tempfile
 import threading
 import time
@@ -61,10 +63,10 @@ def get_ffmpeg_bin() -> Path:
     )
 
 
-def apply_atempo(audio_bytes: bytes, tempo: float) -> bytes:
+def apply_atempo(audio_bytes: bytes, tempo: float, *, force: bool = False) -> bytes:
     """Adjust a clip within the shared nominal speed ceiling."""
     tempo = max(0.8, min(TimingPolicy.current().max_speed, tempo))
-    if abs(tempo - 1.0) < 0.02:
+    if not force and abs(tempo - 1.0) < 0.02:
         return audio_bytes
 
     ffmpeg_bin = get_ffmpeg_bin()
@@ -79,10 +81,53 @@ def apply_atempo(audio_bytes: bytes, tempo: float) -> bytes:
         "pipe:1",
     ]
     try:
-        res = subprocess.run(cmd, input=audio_bytes, capture_output=True, check=True)
+        res = subprocess.run(cmd, input=audio_bytes, capture_output=True, check=True,
+                             timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS))
         return res.stdout
     except Exception as e:
         raise PipelineException(SystemErrorCodes.TTS_FAILED, f'Không căn được tốc độ audio (atempo={tempo:.3f}).') from e
+
+
+def apply_atempo_batch(tasks: List[Tuple[bytes, List[float]]]) -> List[bytes]:
+    """Run FFmpeg atempo across up to 16 WAV clips in one subprocess invocation."""
+    if not tasks:
+        return []
+    max_speed = TimingPolicy.current().max_speed
+    if len(tasks) == 1 and len(tasks[0][1]) == 1:
+        return [apply_atempo(tasks[0][0], tasks[0][1][0], force=True)]
+
+    ffmpeg_bin = get_ffmpeg_bin()
+    results: List[bytes] = []
+    batch_size = 16
+    for start in range(0, len(tasks), batch_size):
+        chunk = tasks[start : start + batch_size]
+        with tempfile.TemporaryDirectory(prefix="atempo_batch_") as tmp_dir:
+            tmp_root = Path(tmp_dir)
+            cmd = [str(ffmpeg_bin), "-hide_banner", "-loglevel", "error", "-y"]
+            filter_parts: List[str] = []
+            map_args: List[str] = []
+            out_paths: List[Path] = []
+            for idx, (audio_bytes, raw_factors) in enumerate(chunk):
+                in_path = tmp_root / f"in_{idx}.wav"
+                out_path = tmp_root / f"out_{idx}.wav"
+                in_path.write_bytes(audio_bytes)
+                out_paths.append(out_path)
+                cmd.extend(["-i", str(in_path)])
+                clamped = [max(0.8, min(max_speed, float(f))) for f in raw_factors]
+                chain = ",".join(f"atempo={f:.3f}" for f in clamped)
+                filter_parts.append(f"[{idx}:a]{chain}[a{idx}]")
+                map_args.extend(["-map", f"[a{idx}]", "-f", "wav", str(out_path)])
+            cmd.extend(["-filter_complex", ";".join(filter_parts), *map_args])
+            try:
+                subprocess.run(
+                    cmd, capture_output=True, check=True,
+                    timeout=media_timeout(settings.FFMPEG_TIMEOUT_SECONDS),
+                )
+            except Exception as e:
+                raise PipelineException(SystemErrorCodes.TTS_FAILED, 'Không căn được tốc độ audio theo lô FFmpeg.') from e
+            for out_path in out_paths:
+                results.append(out_path.read_bytes())
+    return results
 
 
 class AudioTimelineBuilder:
@@ -94,12 +139,20 @@ class AudioTimelineBuilder:
         cache: Optional[TTSCache] = None,
         max_atempo: Optional[float] = None,
         max_concurrency: Optional[int] = None,
+        measured_only: bool = False,
+        defer_assemble: bool = False,
     ):
+        self._provider_was_supplied = provider is not None
+        if provider is None and settings.OFFLINE_MODE:
+            from src.tts.registry import provider_for_voice
+            provider = provider_for_voice(settings.EDGE_TTS_VOICE)
         self.provider = provider or EdgeTTSProvider()
         self.cache = cache or TTSCache()
         self.policy = TimingPolicy.current()
         self.max_atempo = min(max_atempo or self.policy.max_speed, self.policy.max_speed)
         self.max_concurrency = max_concurrency
+        self.measured_only = measured_only
+        self.defer_assemble = defer_assemble
 
     def synthesize_cues(
         self,
@@ -112,9 +165,11 @@ class AudioTimelineBuilder:
         should_continue: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         """Synthesize voiceover for all cues, fit to slots, and build unified voiceover.wav."""
-        from src.tts.processing import parse_voice, trim_rms, apply_color
+        if not voice and (settings.OFFLINE_MODE or not self._provider_was_supplied):
+            voice = getattr(settings, 'DEFAULT_TTS_VOICE', settings.EDGE_TTS_VOICE)
+        from src.tts.processing import parse_voice, trim_rms, trim_pcm_padding, apply_color
         base_voice, color = parse_voice(voice)
-        if (voice and voice.startswith('vieneu:')) or self.provider.name == 'vieneu':
+        if (voice and (voice.startswith('vieneu:') or voice.startswith('piper:'))) or self.provider.name in ('vieneu', 'piper'):
             from src.tts.registry import provider_for_voice
             self.provider = provider_for_voice(voice)
         cues = sorted(cues, key=lambda cue: (cue.start, cue.index))
@@ -140,11 +195,17 @@ class AudioTimelineBuilder:
 
         sample_rate = getattr(self.provider, 'sample_rate', 24000)
         total_video_duration = max(c.end for c in cues) + 0.25
-        # Initialize full audio timeline buffer with silence
-        # A 132-minute timeline occupies ~724 MiB as float32. Keep it on disk
-        # rather than allocating that buffer in RAM alongside OCR/TTS models.
-        timeline_store = tempfile.TemporaryFile(dir=vo_dir)
-        timeline_samples = np.memmap(timeline_store, dtype=np.float32, mode='w+', shape=(max(1, int(total_video_duration * sample_rate)),))
+        defer_master = bool(self.measured_only and self.defer_assemble)
+        total_samples = max(1, int(total_video_duration * sample_rate))
+        # Initialize full audio timeline buffer with silence when assembling immediately.
+        # When defer_assemble is enabled, avoid multi-hundred-MB memmap & zero WAV writes
+        # during timing recovery iterations.
+        if defer_master:
+            timeline_store = None
+            timeline_samples = None
+        else:
+            timeline_store = tempfile.TemporaryFile(dir=vo_dir)
+            timeline_samples = np.memmap(timeline_store, dtype=np.float32, mode='w+', shape=(total_samples,))
 
         try:
             timeline_meta = []
@@ -160,6 +221,13 @@ class AudioTimelineBuilder:
             key_locks_guard = threading.Lock()
             budgets = {c.index: {'attempts': settings.TTS_MAX_RETRIES,
                                 'seconds': settings.TTS_TOTAL_DEADLINE_SECONDS} for c in cues}
+            def cue_cache_key(cue,normalized):
+                return self.cache.compute_key(provider=self.provider.name,
+                    voice=base_voice or (settings.EDGE_TTS_VOICE if self.provider.name=='edge' else 'default'),
+                    normalized_text=normalized,rate=cue.tts_rate or rate,pitch=pitch,sample_rate=sample_rate,
+                    model_version=(self.provider.cache_version_for_voice(base_voice)
+                        if self.provider.name == 'piper'
+                        else getattr(self.provider,'cache_version','v1')))
             def synthesize_one(cue: Cue, cache_only=False):
                 if not continue_tts():
                     raise TaskCancelled("TTS cancelled")
@@ -169,15 +237,7 @@ class AudioTimelineBuilder:
                 normalized = normalize_vietnamese_text(text)
                 if not normalized or not re.search(r"[\w\dÀ-ỹa-zA-Z]", normalized):
                     return None
-                cache_key = self.cache.compute_key(
-                    provider=self.provider.name,
-                    voice=base_voice or (settings.EDGE_TTS_VOICE if self.provider.name == "edge" else "default"),
-                    normalized_text=normalized,
-                    rate=cue.tts_rate or rate,
-                    pitch=pitch,
-                    sample_rate=sample_rate,
-                    model_version=getattr(self.provider, 'cache_version', 'v1'),
-                )
+                cache_key = cue_cache_key(cue,normalized)
                 # Serialize identical cache misses, not different utterances.
                 with key_locks_guard:
                     key_lock = key_locks.setdefault(cache_key, threading.Lock())
@@ -216,6 +276,18 @@ class AudioTimelineBuilder:
                             budget['seconds'] -= time.monotonic()-started
                         if raw_audio:
                             if not valid_audio(raw_audio):
+                                try:
+                                    samples, sr = sf.read(io.BytesIO(raw_audio), dtype='float32')
+                                    silent = sr > 0 and samples.size > 0 and np.isfinite(samples).all() and not np.any(np.abs(samples) >= 1e-5)
+                                except (OSError, RuntimeError, ValueError):
+                                    silent = False
+                                if (silent and cue.effective_source_text in {'啊', '嗯', '哦', '呀', '呃', '唉', '哈', '哼'}
+                                        and len(re.findall(r'\w+', cue.vi_text or '')) <= 2):
+                                    import hashlib
+                                    cue.speech_exemption = dict(reason='silent_interjection',
+                                        source=cue.effective_source_text, target=(cue.vi_text or '').strip(),
+                                        measured_silent=True, audio_sha256=hashlib.sha256(raw_audio).hexdigest())
+                                    return None
                                 raise PipelineException(SystemErrorCodes.TTS_FAILED, f'Cue {cue.index} trả audio hỏng hoặc im lặng; không lưu cache.')
                             check_disk()
                             self.cache.put(cache_key, raw_audio)
@@ -245,13 +317,48 @@ class AudioTimelineBuilder:
                     completed += 1
             # A partial matching cache is a resume. Start conservatively rather
             # than immediately repeating the failed concurrent service wave.
+            if getattr(self.provider,'batch_size',1)>1 and missing:
+                unique={}
+                for idx,cue in missing:
+                    normalized=normalize_vietnamese_text(spoken_text(cue))
+                    key=cue_cache_key(cue,normalized)
+                    if key not in unique:
+                        unique[key]={'id':str(cue.index),'text':normalized,'rate':cue.tts_rate or rate}
+                tasks=list(unique.items())
+                # Bound raw audio and pending text to at most eight cues/request.
+                for start in range(0,len(tasks),8):
+                    group=tasks[start:start+8]
+                    by_id={item['id']:key for key,item in group}
+                    seen=set()
+                    def persist(cue_id,payload,duration):
+                        if cue_id not in by_id or cue_id in seen:
+                            raise ValueError('Unknown/duplicate durable batch cue ID')
+                        if not continue_tts(): raise TaskCancelled('TTS batch cancelled')
+                        check_disk()
+                        self.cache.put(by_id[cue_id],payload)
+                        check_disk()
+                        seen.add(cue_id)
+                        if progress_callback:
+                            progress_callback(int((len(synthesized)+start+len(seen))/total_cues*70),
+                                f'Giọng batch: lưu {start+len(seen)}/{len(tasks)} câu; {self.provider.execution_label}')
+                    self.provider.synthesize_batch([item for key,item in group],voice=base_voice,pitch=pitch,
+                        should_continue=continue_tts,on_result=persist)
+                    if seen!=set(by_id): raise ValueError('Incomplete durable batch cue IDs')
+                # The normal path still validates, fits and assembles every cue.
+                # Completed cache entries survive any later request failure.
+                remaining=[]
+                for idx,cue in missing:
+                    cached=synthesize_one(cue,cache_only=True)
+                    if cached is cache_miss: remaining.append((idx,cue))
+                    else: synthesized[idx]=cached
+                missing=remaining
             serial_resume = isinstance(self.provider, EdgeTTSProvider) and bool(synthesized) and bool(missing)
             def report_progress():
                 if progress_callback:
                     progress_callback(int(len(synthesized) / total_cues * 70),
                         f'Giọng hợp lệ {len(synthesized)}/{total_cues}; lỗi {len(failed_indices)}; '
                         f'lần gọi lỗi {len(failures)}; chờ thử lại {sum(idx in retried_indices for idx, _ in work)}; '
-                        f'luồng {active_workers}; bộ đọc {self.provider.name}'
+                        f"luồng {active_workers}; bộ đọc {getattr(self.provider, 'execution_label', self.provider.name)}"
                         + (f"; lỗi gần nhất {' -> '.join(failures[-1]['error_chain'])}" if failures else '')
                         + (f" (HTTP {failures[-1]['status']})" if failures and 'status' in failures[-1] else ''))
             active_workers = 1 if serial_resume else workers
@@ -265,7 +372,11 @@ class AudioTimelineBuilder:
                     item = work.popleft() if work else None
                     if item is not None:
                         idx, cue = item
-                        pending[pool.submit(synthesize_one, cue)] = idx
+                        # Each future needs its own Context. Propagate the
+                        # active task/actor into model workers without sharing
+                        # one non-reentrant Context across concurrent calls.
+                        context = contextvars.copy_context()
+                        pending[pool.submit(context.run, synthesize_one, cue)] = idx
                 for _ in range(active_workers):
                     submit_next()
                 while pending or work:
@@ -384,6 +495,7 @@ class AudioTimelineBuilder:
                     if peak > 0:
                         absolute_floor = float(getattr(settings, "TTS_SILENCE_FLOOR", 300)) / 32768.0
                         data = trim_rms(data, sample_rate, absolute_floor)
+                        data = trim_pcm_padding(data,sample_rate,settings.TTS_TRIM_KEEP_MS)
 
                 clip_duration = len(data) / sample_rate
                 raw_duration = clip_duration
@@ -392,17 +504,17 @@ class AudioTimelineBuilder:
 
                 # A preceding long cue may have consumed part of this window.
                 # Fit against the remaining deadline, preserving nonoverlap.
-                nominal_start = max(0.0, cue.start-self.policy.lead)
-                actual_start = max(nominal_start, last_voice_end + (self.policy.pause if timeline_meta else 0))
+                nominal_start = cue.start if self.measured_only else max(0.0, cue.start-self.policy.lead)
+                actual_start = nominal_start if self.measured_only else max(nominal_start, last_voice_end + (self.policy.pause if timeline_meta else 0))
                 # A 333ms caption really has 333ms, not a fabricated 500ms.
                 # The old floor under-compressed short clips and propagated
                 # their avoidable delay into every following sentence.
-                deadline = self.policy.deadline(cues, idx)
+                deadline = cue.end if self.measured_only else self.policy.deadline(cues, idx)
                 remaining_slot = max(1 / sample_rate, deadline-actual_start)
                 tempo_limit = min(self.max_atempo, self.policy.max_speed/rate_multiplier(cue.tts_rate or rate))
                 tempo_limit = max(1.0, math.floor((tempo_limit+1e-9)*1000)/1000)
                 tempo = 1.0
-                if clip_duration > remaining_slot:
+                if not self.measured_only and clip_duration > remaining_slot:
                     tempo = min(tempo_limit, clip_duration / remaining_slot)
                     if tempo > 1.02:
                         # Apply atempo
@@ -425,16 +537,19 @@ class AudioTimelineBuilder:
                 start_sample = int(round(actual_start * sample_rate))
                 end_sample = start_sample + len(data)
                 last_voice_end = end_sample / sample_rate
+                total_samples = max(total_samples, end_sample)
 
-                if end_sample > len(timeline_samples):
-                    # Expand buffer
-                    timeline_samples.flush()
-                    timeline_samples._mmap.close()
-                    timeline_store.truncate(end_sample * np.dtype(np.float32).itemsize)
-                    timeline_samples = np.memmap(timeline_store, dtype=np.float32, mode='r+', shape=(end_sample,))
+                if timeline_samples is not None:
+                    if end_sample > len(timeline_samples):
+                        # Expand buffer
+                        timeline_samples.flush()
+                        timeline_samples._mmap.close()
+                        timeline_store.truncate(end_sample * np.dtype(np.float32).itemsize)
+                        timeline_samples = np.memmap(timeline_store, dtype=np.float32, mode='r+', shape=(end_sample,))
 
-                # Mix into timeline
-                timeline_samples[start_sample:end_sample] += data
+                    # Mix into timeline
+                    if not self.measured_only:
+                        timeline_samples[start_sample:end_sample] += data
 
                 drift = max(0.0, last_voice_end - cue.end, abs(actual_start - cue.start))
                 drifts.append(drift)
@@ -467,20 +582,25 @@ class AudioTimelineBuilder:
                     pct = 70 + int((idx + 1) / total_cues * 29)
                     progress_callback(pct, f"Đã ghép giọng {idx + 1}/{total_cues}; chờ kiểm tra timing")
 
-            # Normalize audio volume to prevent clipping
-            block_size = sample_rate * 30
-            max_peak = max(float(np.max(np.abs(timeline_samples[start:start + block_size]))) for start in range(0, len(timeline_samples), block_size))
-            if max_peak > 0.95:
-                for start in range(0, len(timeline_samples), block_size):
-                    timeline_samples[start:start + block_size] *= 0.95 / max_peak
+            if timeline_samples is not None:
+                # Normalize audio volume to prevent clipping
+                block_size = sample_rate * 30
+                max_peak = max(float(np.max(np.abs(timeline_samples[start:start + block_size]))) for start in range(0, len(timeline_samples), block_size))
+                if max_peak > 0.95:
+                    for start in range(0, len(timeline_samples), block_size):
+                        timeline_samples[start:start + block_size] *= 0.95 / max_peak
 
-            # Write master voiceover.wav
-            vo_wav_path = vo_dir / "voiceover.wav"
-            sf.write(str(vo_wav_path), timeline_samples, sample_rate, format="WAV")
-            total_samples = len(timeline_samples)
+                # Write master voiceover.wav
+                vo_wav_path = vo_dir / "voiceover.wav"
+                sf.write(str(vo_wav_path), timeline_samples, sample_rate, format="WAV")
+                total_samples = len(timeline_samples)
+            else:
+                vo_wav_path = None
         finally:
-            timeline_samples._mmap.close()
-            timeline_store.close()
+            if timeline_samples is not None:
+                timeline_samples._mmap.close()
+            if timeline_store is not None:
+                timeline_store.close()
 
         # Write timeline.json
         (vo_dir / "timeline.json").write_text(json.dumps(timeline_meta, indent=2), encoding="utf-8")
@@ -501,7 +621,9 @@ class AudioTimelineBuilder:
 
         return {
             "timeline": timeline_meta,
-            "voiceover_wav": str(vo_wav_path),
+            "voiceover_wav": str(vo_wav_path) if vo_wav_path is not None else None,
+            "sample_rate": sample_rate,
+            "total_frames": total_samples,
             "total_duration": round(total_samples / sample_rate, 2),
             "max_drift": round(max_drift, 3),
             "mean_drift": round(mean_drift, 3),

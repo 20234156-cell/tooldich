@@ -138,7 +138,19 @@ def test_browser_reader_uses_persistent_profile_and_releases_resources(tmp_path,
     if navigation_fails:
         page.goto.side_effect = RuntimeError('navigation failed')
     else:
-        page.goto.side_effect = lambda *args, **kwargs: page.on.call_args.args[1](response)
+        def finish_requests(*args, **kwargs):
+            from playwright.sync_api import Error
+            closed = MagicMock(url=response.url)
+            closed.response.return_value.status = 200
+            closed.response.return_value.json.side_effect = Error('Body unavailable')
+            request = MagicMock(url=response.url)
+            request.response.return_value = response
+            event, callback = page.on.call_args.args
+            assert event == 'requestfinished'
+            callback(closed)
+            callback(request)
+            response.json.assert_not_called()
+        page.goto.side_effect = finish_requests
     page.evaluate.return_value = 'browser-agent'
     with patch('playwright.sync_api.sync_playwright') as playwright:
         engine = playwright.return_value.__enter__.return_value

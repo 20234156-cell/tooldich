@@ -1,9 +1,10 @@
 import json
+import hashlib
 
 import pytest
 
 from src.ocr.base import Cue
-from src.tts.checkpoint import create_voice_manifest, voice_checkpoint_matches
+from src.tts.checkpoint import budget_checkpoint_matches, create_voice_manifest, voice_checkpoint_matches
 from tests.test_timing_policy import speech
 
 
@@ -32,3 +33,19 @@ def test_malformed_voice_manifest_is_a_cache_miss(tmp_path, record):
     cues = [Cue(index=7, start=0, end=1, vi_text='Xin chào',
                 voice_audio_path='voiceover/clips/clip.wav')]
     assert voice_checkpoint_matches(tmp_path, cues, 'current-input') is False
+
+
+@pytest.mark.parametrize('report', ['matching', 'wrong-source', '{', '[]', None])
+def test_budget_checkpoint_requires_readable_source_bound_report(tmp_path, report):
+    source = tmp_path / 'source.mp4'
+    source.write_bytes(b'source')
+    marker = tmp_path / 'voiceover/budget_report.json'
+    marker.parent.mkdir()
+    if report in ('matching', 'wrong-source'):
+        marker.write_text(json.dumps({
+            'version': 'cluster-budget-v1',
+            'source_sha256': hashlib.sha256(b'source').hexdigest() if report == 'matching' else 'old',
+        }))
+    elif report is not None:
+        marker.write_text(report)
+    assert budget_checkpoint_matches(tmp_path, source) is (report == 'matching')

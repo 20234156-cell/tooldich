@@ -3,6 +3,7 @@
 No challenge solving, signature generation or browser credential extraction.
 """
 from http.cookiejar import MozillaCookieJar
+from collections import deque
 from pathlib import Path
 import hashlib
 import json
@@ -25,7 +26,7 @@ def _seed_profile(context, cookies: list, marker: Path) -> None:
 
 
 def read_video_page(video_id: str, cookie_file: str, timeout_seconds: int) -> dict:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error, sync_playwright
 
     jar = MozillaCookieJar(str(Path(cookie_file).resolve()))
     jar.load(ignore_discard=True, ignore_expires=True)
@@ -56,26 +57,32 @@ def read_video_page(video_id: str, cookie_file: str, timeout_seconds: int) -> di
                 _seed_profile(context, cookies, profile/'.cookie_seed')
                 page = context.pages[0] if context.pages else context.new_page()
 
-                def on_response(response):
-                    nonlocal detail
-                    if '/aweme/v1/web/aweme/detail/' not in response.url:
-                        return
-                    statuses.append(response.status)
-                    if response.status != 200:
-                        return
-                    try:
-                        item = response.json().get('aweme_detail')
-                        if isinstance(item, dict) and str(item.get('aweme_id')) == video_id:
-                            detail = item
-                    except (ValueError, TypeError, AttributeError):
-                        pass
+                finished = deque()
 
-                page.on('response', on_response)
+                def on_request_finished(request):
+                    if '/aweme/v1/web/aweme/detail/' in request.url:
+                        finished.append(request)
+
+                page.on('requestfinished', on_request_finished)
                 deadline = time.monotonic() + timeout_seconds
                 page.goto(f'https://www.douyin.com/video/{video_id}',
                           wait_until='domcontentloaded', timeout=timeout_seconds * 1000)
                 while detail is None and time.monotonic() < deadline:
-                    page.wait_for_timeout(200)
+                    if not finished:
+                        page.wait_for_timeout(200)
+                        continue
+                    try:
+                        response = finished.popleft().response()
+                        if response is None:
+                            continue
+                        statuses.append(response.status)
+                        if response.status != 200:
+                            continue
+                        item = response.json().get('aweme_detail')
+                        if isinstance(item, dict) and str(item.get('aweme_id')) == video_id:
+                            detail = item
+                    except (Error, ValueError, TypeError, AttributeError):
+                        continue
                 if detail is None:
                     raise ValueError('Browser did not receive requested video detail; HTTP statuses: '
                                      + ','.join(map(str, sorted(set(statuses)))))

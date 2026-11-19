@@ -1,5 +1,5 @@
 """Cloud routes; upload and deletion share the pipeline's per-project queue lock."""
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -14,6 +14,10 @@ router = APIRouter(prefix='/api/cloud')
 
 class OAuthConfig(BaseModel):
     document: dict[str, Any]
+
+
+class ArchiveRequest(BaseModel):
+    mode: Literal['metadata_only','full_delivery'] = 'metadata_only'
 
 
 class Policy(BaseModel):
@@ -106,14 +110,17 @@ def quota():
 
 
 @router.post('/projects/{project_id}/upload')
-def upload(project_id: str, request: Request):
+def upload(project_id: str, request: Request, payload: ArchiveRequest = ArchiveRequest()):
     local_mutation(request)
     project_id = validate_identifier(project_id,'Project ID')
     # Fast local preflight; hashing/provider traffic run only in the queued worker.
-    archive.delivery(project_id)
+    if payload.mode=='full_delivery':archive.delivery(project_id)
+    else:
+        from src.cloud.metadata_archive import project_root
+        project_root(project_id)
     if not oauth.status()['connected']:
         raise CloudError('Hãy kết nối Drive trước.')
-    task = queue.submit(project_id,'CLOUD_UPLOAD',archive.upload,project_id,inject_cancel=True,update_pipeline_job=False)
+    task = queue.submit(project_id,'CLOUD_UPLOAD',archive.archive_project,project_id,mode=payload.mode,inject_cancel=True,update_pipeline_job=False)
     from src.api.app import _task_payload
     return _task_payload(task)
 
@@ -135,3 +142,40 @@ def cancel(task_id: str, request: Request):
         raise HTTPException(404,'Không tìm thấy tác vụ cloud.')
     queue.cancel(task_id)
     return {'state':task.state,'cancel_requested':task.cancel_requested}
+
+
+@router.get('/drive/status')
+def drive_status_alias():
+    return oauth.status()
+
+
+@router.get('/youtube/status')
+def youtube_status():
+    from src.cloud import youtube_oauth
+    return youtube_oauth.status()
+
+
+@router.post('/youtube/auth/start')
+def youtube_connect(request: Request):
+    local_mutation(request)
+    from src.cloud import youtube_oauth
+    return youtube_oauth.start()
+
+
+@router.post('/youtube/auth/cancel')
+def youtube_cancel(request: Request):
+    local_mutation(request)
+    from src.cloud import youtube_oauth
+    return youtube_oauth.cancel()
+
+
+@router.post('/youtube/disconnect')
+def youtube_disconnect(request: Request):
+    local_mutation(request)
+    from src.cloud import youtube_oauth, youtube_upload
+    if youtube_oauth.status()['connecting']:raise CloudError('Hãy hủy phiên đăng nhập trước khi ngắt kết nối.')
+    with LOCK:
+        require_idle()
+        cfg=youtube_upload.config()
+        youtube_upload.save_config({k:cfg[k] for k in ('client_id','client_secret') if k in cfg})
+    return youtube_oauth.status()

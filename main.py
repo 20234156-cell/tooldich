@@ -89,10 +89,13 @@ def ocr(project_id: str):
 
 
 @app.command("approve-source")
-def approve_source(project_id: str):
+def approve_source(
+    project_id: str,
+    auto_resolve: bool = typer.Option(False, "--auto-resolve", "-y", help="Tự động giải quyết các cue có nhiều lựa chọn bằng biến thể tốt nhất"),
+):
     """Xác nhận các cue tiếng Trung sau khi đã kiểm tra thủ công."""
     try:
-        console.print_json(orchestrator.approve_source_cues(project_id).model_dump_json())
+        console.print_json(orchestrator.approve_source_cues(project_id, auto_resolve=auto_resolve).model_dump_json())
     except Exception as exc:
         _fail(exc)
 
@@ -168,11 +171,21 @@ def run_all(
     project_id: str,
     voice: Optional[str] = typer.Option(None, "--voice", "-v"),
     style: Optional[str] = typer.Option(None, help="cover | clean | bilingual; mặc định giữ cấu hình đã lưu"),
-    extraction_mode: str = typer.Option("hardsub", help="hardsub | auto | stt"),
+    extraction_mode: str = typer.Option("auto", help="hardsub | auto | stt [default: auto]"),
+    rate: str = typer.Option("+0%", help="Tốc độ đọc, ví dụ: +15%"),
+    audio_mode: Optional[str] = typer.Option(None, help="mix | voice_only | original_only"),
 ):
-    """Chạy OCR → dịch → TTS → render → QA; yêu cầu ROI đã được chọn."""
+    """Chạy tự động OCR → dịch → TTS → render → QA theo chuẩn SirVietsub."""
     try:
-        result = orchestrator.run_all(project_id, voice=voice, style=style, extraction_mode=extraction_mode, progress_callback=_progress)
+        result = orchestrator.run_all(
+            project_id,
+            voice=voice,
+            style=style,
+            rate=rate,
+            audio_mode=audio_mode,
+            extraction_mode=extraction_mode,
+            progress_callback=_progress,
+        )
         console.print(Panel(str(result["output_path"]), title="Hoàn tất Fast Hardsub", style="green"))
     except Exception as exc:
         _fail(exc)

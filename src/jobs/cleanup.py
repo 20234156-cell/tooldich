@@ -22,7 +22,7 @@ def cleanup_stale_files(
     - min_orphan_age_seconds: Thư mục dự án không có trong DB và đã tạo lâu hơn mốc này sẽ bị xoá.
     """
     base_storage = Path(storage_dir or settings.storage_path)
-    if settings.SERVER_MODE:
+    if settings.SERVER_MODE or settings.PERSONAL_MODE or settings.OFFLINE_MODE:
         return {'deleted_parts':[],'deleted_projects':[],'reason':'ADMIN_PREVIEW_REQUIRED'}
     if not base_storage.exists():
         return {"deleted_parts": [], "deleted_projects": []}

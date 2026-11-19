@@ -6,7 +6,7 @@ nhận về một chuỗi filter dựng sẵn nên không phụ thuộc vào b�
 """
 
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -14,9 +14,10 @@ from pydantic import BaseModel, Field
 # v2: dò dải sub theo mốc lời thoại + che dải sub bằng làm mờ thay vì khay đen.
 # v3: watermark quá to cho delogo cũng làm mờ thay vì ô đen.
 # v4: chỉ tô đúng màu khi nền tối phẳng ở gần như mọi khung, không chỉ khung trung vị.
-DETECTOR_VERSION = 4
+# v5: bản đồ mặt nạ đa vùng theo thời gian (watermark + subtitle_band + secondary_caption) & blur mờ viền.
+DETECTOR_VERSION = 5
 
-MASK_KINDS = ("watermark", "subtitle_band")
+MASK_KINDS = ("watermark", "subtitle_band", "secondary_caption")
 MASK_METHODS = ("drawbox", "delogo", "blur")
 
 # Làm mờ dải sub cứng rồi tối nhẹ xuống để chữ Việt nổi lên trên. Đo trên khung hình
@@ -50,6 +51,14 @@ class MaskBox(BaseModel):
     method: str = "drawbox"
     color: str = "black"
     confidence: float = 0.0
+    intervals: List[Tuple[float, float]] = Field(default_factory=list)
+    feather: int = Field(default=6, ge=0, le=32)
+
+    def enable_expr(self) -> str:
+        if not self.intervals:
+            return ""
+        expr = "+".join(f"between(t,{float(s):.3f},{float(e):.3f})" for s, e in self.intervals if e > s)
+        return f":enable='{expr}'" if expr else ""
 
     def as_filter(self, index: int = 0) -> str:
         """Dựng một mắt xích bộ lọc ffmpeg cho vùng này.
@@ -79,6 +88,22 @@ class MaskBox(BaseModel):
         luma = max(1, min(BLUR_LUMA_RADIUS, min(w, h) // 2 - 1))
         chroma = max(1, min(BLUR_LUMA_RADIUS // 2, min(w, h) // 4 - 1))
         a, b, c = f"cb{index}a", f"cb{index}b", f"cb{index}c"
+        if self.feather > 0 and min(w, h) >= 24:
+            fpx = max(2, min(self.feather, w // 6, h // 6))
+            m_radius = max(1, min(fpx, w // 4 - 1, h // 4 - 1))
+            s, m, mk = f"cb{index}s", f"cb{index}m", f"cb{index}k"
+            return (
+                f"split[{a}][{b}];"
+                f"[{b}]crop={w}:{h}:{x}:{y},"
+                f"boxblur=luma_radius={luma}:luma_power=2:"
+                f"chroma_radius={chroma}:chroma_power=2,"
+                f"eq=brightness={BLUR_DARKEN},split[{s}][{m}];"
+                f"[{m}]format=gray,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,"
+                f"drawbox=x={fpx}:y={fpx}:w=iw-{2*fpx}:h=ih-{2*fpx}:color=white:t=fill,"
+                f"boxblur=luma_radius={m_radius}:luma_power=2[{mk}];"
+                f"[{s}][{mk}]alphamerge[{c}];"
+                f"[{a}][{c}]overlay=x={x}:y={y}"
+            )
         return (
             f"split[{a}][{b}];"
             f"[{b}]crop={w}:{h}:{x}:{y},"
@@ -105,6 +130,21 @@ class CleanPlan(BaseModel):
     @property
     def has_subtitle_band(self) -> bool:
         return any(b.kind == "subtitle_band" for b in self.boxes)
+
+    def to_tracks(
+        self,
+        *,
+        kinds: Optional[Tuple[str, ...]] = None,
+    ) -> List[Tuple[MaskBox, List[Tuple[float, float]]]]:
+        """Trả danh sách `(MaskBox, intervals)` đã kẹp trong khung hình cho filtergraph."""
+        tracks: List[Tuple[MaskBox, List[Tuple[float, float]]]] = []
+        for box in self.boxes:
+            if kinds is not None and box.kind not in kinds:
+                continue
+            safe = clamp_box(box, self.video_width, self.video_height)
+            if safe is not None:
+                tracks.append((safe, list(safe.intervals)))
+        return tracks
 
 
 def clamp_box(box: MaskBox, width: int, height: int) -> Optional[MaskBox]:
@@ -141,5 +181,5 @@ def build_mask_filter(plan: Optional[CleanPlan]) -> str:
     for index, box in enumerate(plan.boxes):
         safe = clamp_box(box, plan.video_width, plan.video_height)
         if safe is not None:
-            links.append(safe.as_filter(index))
+            links.append(safe.as_filter(index) + safe.enable_expr())
     return ",".join(links)

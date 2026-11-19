@@ -310,7 +310,7 @@ class OverlayDetector:
         return "blur", "black"
 
     def detect_watermark(
-        self, bright_mask: np.ndarray, frames: np.ndarray
+        self, bright_mask: np.ndarray, frames: np.ndarray, *, max_width_ratio: float = 0.45
     ) -> Optional[MaskBox]:
         """Tìm MỘT vùng sáng đứng yên gần như suốt video, nằm ở một góc khung hình."""
         count, height, width = bright_mask.shape
@@ -350,7 +350,7 @@ class OverlayDetector:
 
             # Chốt chặn: một vùng che quá lớn là dò SAI, không phải dò trúng đậm.
             # 4 watermark thật đo được đều chỉ chiếm ~3,5% khung hình.
-            if w > width * 0.45 or (w * h) > settings.CLEAN_WATERMARK_MAX_AREA * width * height:
+            if w > width * max_width_ratio or (w * h) > settings.CLEAN_WATERMARK_MAX_AREA * width * height:
                 continue
 
             # Nền sáng phẳng cũng "bền" theo thời gian nhưng không có cấu trúc chữ.
@@ -560,6 +560,133 @@ class OverlayDetector:
             return None
         return self.detect_subtitle_band_timed(on_frames, off_frames)
 
+    def detect_secondary_captions(
+        self,
+        text_mask: np.ndarray,
+        frames: np.ndarray,
+        *,
+        timestamps: Optional[Sequence[float]] = None,
+        duration: float = 0.0,
+        primary_band: Optional[MaskBox] = None,
+        watermark: Optional[MaskBox] = None,
+        max_boxes: int = 2,
+    ) -> List[MaskBox]:
+        """Dò chữ phụ/chú thích cháy sẵn ngoài ROI phụ đề chính kèm khoảng thời gian xuất hiện."""
+        count, height, width = text_mask.shape
+        if count < 4 or height < 32 or width < 32:
+            return []
+
+        work = text_mask.copy()
+        if primary_band is not None:
+            y0 = max(0, primary_band.y - 6)
+            y1 = min(height, primary_band.y + primary_band.h + 6)
+            work[:, y0:y1, :] = False
+        if watermark is not None:
+            wx0 = max(0, watermark.x - 4)
+            wx1 = min(width, watermark.x + watermark.w + 4)
+            wy0 = max(0, watermark.y - 4)
+            wy1 = min(height, watermark.y + watermark.h + 4)
+            work[:, wy0:wy1, wx0:wx1] = False
+
+        # Loại dải dưới cùng nếu chưa có primary_band để không bắt nhầm phụ đề chính
+        if primary_band is None:
+            bottom_guard = int(height * (0.58 if height > width else 0.72))
+            work[:, bottom_guard:, :] = False
+
+        row_has_text = work.mean(axis=2) > 0.012
+        row_persistence = row_has_text.mean(axis=0)
+        min_persist = max(0.12, 2.0 / float(count))
+        active_rows = np.where((row_persistence >= min_persist) & (row_persistence <= 0.96))[0]
+        if not active_rows.size:
+            return []
+
+        # Gom các hàng liền kề (khe hở tối đa 3px) thành từng dải ngang ứng viên
+        runs: List[Tuple[int, int]] = []
+        run_start = int(active_rows[0])
+        run_end = run_start
+        for r in active_rows[1:]:
+            ri = int(r)
+            if ri - run_end <= 3:
+                run_end = ri
+            else:
+                runs.append((run_start, run_end))
+                run_start = run_end = ri
+        runs.append((run_start, run_end))
+
+        candidates: List[MaskBox] = []
+        min_strip_h = max(8, int(height * 0.015))
+        max_strip_h = max(min_strip_h + 2, int(height * settings.CLEAN_SUBTITLE_BAND_MAX_H))
+        step_half = 0.5
+        if timestamps and len(timestamps) >= 2:
+            diffs = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1) if timestamps[i + 1] > timestamps[i]]
+            if diffs:
+                step_half = max(0.25, float(np.median(diffs)) / 2.0)
+
+        for top, bottom in runs:
+            sh = bottom - top + 1
+            if sh < min_strip_h or sh > max_strip_h:
+                continue
+            strip = work[:, top:bottom + 1, :]
+            frame_counts = strip.sum(axis=(1, 2))
+            active_idx = np.where(frame_counts >= max(MIN_TEXT_PIXELS, int(width * 0.01)))[0]
+            if len(active_idx) < 2:
+                continue
+            col_hits = strip[active_idx].mean(axis=(0, 1)) > 0.08
+            cols = np.where(col_hits)[0]
+            if not cols.size:
+                continue
+            x0 = max(0, int(cols[0]) - WATERMARK_PADDING * 2)
+            x1 = min(width, int(cols[-1]) + WATERMARK_PADDING * 2 + 1)
+            y0 = max(0, top - WATERMARK_PADDING)
+            y1 = min(height, bottom + WATERMARK_PADDING + 1)
+            bw, bh = x1 - x0, y1 - y0
+            if bw < max(16, int(width * 0.06)) or bh < min_strip_h:
+                continue
+            patch_std = float(np.median(frames[active_idx, y0:y1, x0:x1], axis=0).std())
+            if patch_std < MIN_BOX_STRUCTURE_STD:
+                continue
+
+            sub_counts = work[:, y0:y1, x0:x1].sum(axis=(1, 2))
+            typical = float(np.median(sub_counts[active_idx]))
+            present = (sub_counts >= max(MIN_TEXT_PIXELS, typical * 0.45))
+            conf = float(present.mean())
+            if conf < 0.12 or len(active_idx) / float(count) < 0.12:
+                continue
+
+            intervals: List[Tuple[float, float]] = []
+            if timestamps and len(timestamps) == count and not present.all():
+                max_t = float(duration) if duration > 0 else float(timestamps[-1]) + step_half
+                for idx_f, flag in enumerate(present):
+                    if not flag:
+                        continue
+                    t0 = round(max(0.0, float(timestamps[idx_f]) - step_half), 3)
+                    t1 = round(min(max_t, float(timestamps[idx_f]) + step_half), 3)
+                    if intervals and t0 <= intervals[-1][1] + 0.05:
+                        intervals[-1] = (intervals[-1][0], max(intervals[-1][1], t1))
+                    else:
+                        intervals.append((t0, t1))
+
+            method, color = self._pick_method(frames, (x0, y0, bw, bh))
+            if method == "delogo" and (bw > width * 0.25 or (bw * bh) > settings.CLEAN_WATERMARK_MAX_AREA * width * height):
+                method, color = "blur", "black"
+            candidates.append(
+                MaskBox(
+                    x=x0,
+                    y=y0,
+                    w=bw,
+                    h=bh,
+                    kind="secondary_caption",
+                    method=method,
+                    color=color,
+                    confidence=round(conf, 3),
+                    intervals=intervals,
+                    feather=6,
+                )
+            )
+
+        candidates.sort(key=lambda b: b.confidence, reverse=True)
+        return candidates[:max_boxes]
+
     # ------------------------------------------------------------------ đầu vào chính
 
     def detect(
@@ -571,6 +698,7 @@ class OverlayDetector:
         scenes: Optional[Sequence] = None,
         source_key: str = "",
         speech: Optional[Sequence] = None,
+        corner_logo_only: bool = False,
     ) -> CleanPlan:
         """Dựng kế hoạch làm sạch cho một video. KHÔNG BAO GIỜ ném ngoại lệ.
 
@@ -604,14 +732,20 @@ class OverlayDetector:
                 return plan
 
             plan.video_height, plan.video_width = frames.shape[1], frames.shape[2]
-            text_mask = self._text_mask(frames)
-
             boxes: List[MaskBox] = []
-            watermark = self.detect_watermark(self._bright_mask(frames), frames)
+            watermark = self.detect_watermark(self._bright_mask(frames), frames,
+                                              max_width_ratio=0.28 if corner_logo_only else 0.45)
             if watermark is not None:
                 boxes.append(watermark)
             else:
                 plan.notes.append("Không thấy watermark tĩnh nào đủ chắc chắn.")
+
+            if corner_logo_only:
+                plan.boxes = boxes
+                plan.origin = 'auto' if boxes else 'none'
+                return plan
+
+            text_mask = self._text_mask(frames)
 
             # Ưu tiên dò theo mốc lời thoại (chính xác hơn hẳn khi đã có transcript),
             # không ra thì mới dùng cách dò theo độ bền ngắt quãng.
@@ -625,6 +759,16 @@ class OverlayDetector:
                 boxes.append(band)
             else:
                 plan.notes.append("Không thấy dải phụ đề cứng nào đủ chắc chắn.")
+
+            secondary = self.detect_secondary_captions(
+                text_mask,
+                frames,
+                timestamps=timestamps,
+                duration=duration,
+                primary_band=band,
+                watermark=watermark,
+            )
+            boxes.extend(secondary)
 
             safe = [
                 b for b in (

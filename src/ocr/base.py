@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Literal
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional, Literal, Tuple
+from pydantic import BaseModel, Field, field_validator
 
 
 class Cue(BaseModel):
@@ -14,12 +14,27 @@ class Cue(BaseModel):
     end: float = Field(ge=0.0, description="End time in seconds")
     text: str = Field(default="", description="Original Chinese OCR text")
     confidence: float = Field(default=0.0, ge=0.0, le=100.0, description="OCR confidence (0-100)")
+    source_kind: Literal['ocr', 'stt'] = 'ocr'
     ocr_alternatives: List[Dict[str, Any]] = Field(default_factory=list)
+    source_cover: Optional[Tuple[float, float]] = None
+    text_classification: Literal['unclassified', 'subtitle', 'mixed', 'uncertain'] = 'unclassified'
+    scene_texts: List[str] = Field(default_factory=list)
+    caption_role: Literal['unclassified', 'nonverbal_laughter', 'background_lyrics'] = 'unclassified'
+    caption_role_proof: Optional[Dict[str, Any]] = None
+
+    @field_validator("source_cover")
+    @classmethod
+    def validate_source_cover(cls, value):
+        if value is not None and not 0 <= value[0] < value[1] <= 1:
+            raise ValueError("Invalid source caption cover bounds")
+        return value
+
     image_path: Optional[str] = Field(default=None, description="Relative path to cropped evidence image")
     corrected_text: Optional[str] = Field(default=None, description="AI or human corrected source text")
     vi_text: Optional[str] = Field(default=None, description="Vietnamese translated text")
     translation_origin: Literal['legacy', 'ai', 'manual'] = 'legacy'
     voice_audio_path: Optional[str] = Field(default=None, description="Path to generated TTS PCM or WAV")
+    speech_exemption: Optional[Dict[str, Any]] = None
     voice_duration: Optional[float] = Field(default=None, description="Actual duration of voice audio")
     tts_rate: Optional[str] = Field(default=None, description="Explicit per-cue synthesis rate, including bounded automatic fitting")
     is_approved: bool = Field(default=False, description="Whether human confirmed this cue")
@@ -31,6 +46,13 @@ class Cue(BaseModel):
     @property
     def effective_source_text(self) -> str:
         return (self.corrected_text or self.text).strip()
+
+    @property
+    def needs_source_review(self) -> bool:
+        from src.ocr.text_regions import suspected_creator_credit
+        return (not self.effective_source_text or not (self.corrected_text or '').strip()
+                and bool(self.ocr_alternatives or (self.source_kind == 'ocr' and
+                         (self.confidence < 70 or suspected_creator_credit(self.text)))))
 
 
 def format_srt_timestamp(seconds: float) -> str:

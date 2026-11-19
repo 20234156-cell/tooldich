@@ -2,7 +2,7 @@
 import numpy as np
 from scipy import signal
 
-VERSION = 'voice-color-rms-v1'
+VERSION = 'voice-color-rms-v2-pcm-padding'
 PRESETS = {'default':'Mặc định','review':'Review Phim — dày, nén tiếng','night':'Kể Chuyện Đêm Khuya — ấm','news':'Tin Tức / Drama — sáng','mystery':'Khoa Học Bí Ẩn — trầm'}
 
 def parse_voice(voice):
@@ -27,6 +27,26 @@ def trim_rms(data, sr, floor):
         return data
     first = max(0,int(active[0]*frame)-int(sr*.04))
     last = min(len(data),int((active[-1]+1)*frame)+int(sr*.18))
+    return data[first:last]
+
+
+def trim_pcm_padding(data, sr, keep_ms):
+    """Honor padding without deleting quiet speech or internal pauses.
+
+    RMS trimming deliberately retains a conservative phonetic tail. Remove
+    only surplus exact-zero PCM at the outer edges after that step. All-zero
+    audio stays unchanged so the existing silent-voice validation still fails.
+    """
+    if not np.isfinite(sr) or sr <= 0 or not np.isfinite(keep_ms) or keep_ms < 0:
+        raise ValueError('Invalid sample rate or silence padding')
+    if data.ndim not in (1,2):
+        raise ValueError('Expected mono or channel audio')
+    active = np.flatnonzero(np.any(data != 0,axis=1) if data.ndim == 2 else data != 0)
+    if not active.size:
+        return data
+    padding = int(round(sr*keep_ms/1000))
+    first = max(0,int(active[0])-padding)
+    last = min(len(data),int(active[-1])+1+padding)
     return data[first:last]
 
 def apply_color(data, sr, preset):

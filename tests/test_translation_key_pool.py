@@ -182,6 +182,44 @@ def test_translation_request_budget_does_not_multiply_by_models_and_keys(monkeyp
     assert 'private-key-value' not in str(error.value)
 
 
+def test_invalid_translation_request_is_not_retried_with_other_keys():
+    from src.jobs.logger import PipelineException
+    pool = MagicMock(count=2)
+    pool.get_next_key.return_value = KeyInfo(id='test', key='private-key-value')
+    translator = BatchTranslator(pool=pool)
+    with patch('google.genai.Client') as factory:
+        generate = factory.return_value.models.generate_content
+        generate.side_effect = RuntimeError('400 INVALID_ARGUMENT: unsupported request field')
+        with pytest.raises(PipelineException) as error:
+            translator._call_gemini_with_rotation('test')
+    assert error.value.details['http_status'] == 400
+    assert generate.call_count == 1
+    pool.record_failure.assert_not_called()
+
+
+def test_successful_fallback_does_not_retry_unavailable_model_next_batch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from config.settings import settings
+    pool = GeminiKeyPool(storage_dir=tmp_path)
+    pool.add_keys(['fixture-private-key'])
+    monkeypatch.setattr(pool, 'wait_translation_turn', lambda *args: None)
+    monkeypatch.setattr(settings, 'TRANSLATION_FALLBACK_MODELS', 'model-B')
+    translator = BatchTranslator(pool=pool, model='model-A')
+    calls = []
+    def generate(**kwargs):
+        calls.append(kwargs['model'])
+        if kwargs['model'] == 'model-A':
+            raise RuntimeError('503 service unavailable')
+        return SimpleNamespace(text='[]', candidates=[], model_version='model-B')
+    with patch('google.genai.Client') as factory:
+        factory.return_value.models.generate_content.side_effect = generate
+        assert translator._call_gemini_with_rotation('first') == '[]'
+        assert translator._call_gemini_with_rotation('second') == '[]'
+    assert calls == ['model-A', 'model-B', 'model-B']
+    assert pool._keys[0].is_usable('model-B')
+    assert not pool._keys[0].is_usable('model-A')
+
+
 def test_translation_expired_deadline_never_calls_provider(monkeypatch):
     from config.settings import settings
     from src.jobs.logger import PipelineException
@@ -228,6 +266,7 @@ def test_model_quota_does_not_disable_other_models_and_survives_reload(tmp_path)
     restored=GeminiKeyPool(storage_dir=tmp_path)
     assert restored.get_next_key('model-A') is None
     assert restored.get_next_key('model-B') is not None
+    assert restored.get_masked_list()[0]['model_block_reasons'] == {'model-A': 'daily_quota'}
     restored.record_failure(restored._keys[0].id,401,'invalid key',model='model-B')
     assert restored.get_next_key('model-A') is None and restored.get_next_key('model-B') is None
 

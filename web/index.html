@@ -3,9 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DuanLayLink — Fast Hardsub Dubbing Studio</title>
+  <title>NpzzSub — Studio phụ đề và lồng tiếng</title>
+  <link rel="icon" href="/favicon.svg?v=4" type="image/svg+xml" sizes="any" />
+  <script src="/workspace-mode.js"></script>
   <link rel="stylesheet" href="/styles.css" />
-  <link rel="stylesheet" href="/redesign.css?v=7" />
+  <link rel="stylesheet" href="/redesign.css?v=20" />
+  <link rel="stylesheet" href="/personal.css?v=1" />
 </head>
 <body>
   <a class="skip-link" href="#main-content">Bỏ qua điều hướng</a>
@@ -25,7 +28,10 @@
     <symbol id="icon-token" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v5c0 4 16 4 16 0V5M4 10v5c0 4 16 4 16 0v-5M4 15v4c0 4 16 4 16 0v-4"/></symbol>
   </defs></svg>
   <aside class="app-sidebar" id="app-sidebar" aria-label="Điều hướng chính">
-    <button class="brand-wrapper" id="nav-brand" title="Về Tổng quan"><span class="brand-logo"><svg class="ui-icon"><use href="#icon-video"/></svg></span><span class="brand-copy"><b>DuanLayLink</b><small>VIDEO WORKSPACE</small></span></button>
+    <button class="brand-wrapper" id="nav-brand" title="Về Tổng quan" aria-label="NpzzSub · Về Tổng quan">
+      <img class="brand-logo" src="/api/studio/wordmark.png?v=4" width="38" height="38" alt="" />
+      <span class="brand-copy"><b>NpzzSub</b><small>VIDEO WORKSPACE</small></span>
+    </button>
     <div class="nav-section-label">KHÔNG GIAN LÀM VIỆC</div>
     <nav class="sidebar-nav">
       <button class="tab active" data-view="dashboard" title="Tổng quan"><svg class="ui-icon"><use href="#icon-grid"/></svg><span>Tổng quan</span></button>
@@ -47,9 +53,40 @@
     <button class="icon-button mobile-menu" id="sidebar-menu" aria-controls="app-sidebar" aria-expanded="false" aria-label="Mở điều hướng"><svg class="ui-icon"><use href="#icon-menu"/></svg></button>
     <div class="page-context"><strong id="page-label">Tổng quan</strong><span id="page-description">Theo dõi video, tài nguyên và tiến độ xử lý.</span></div>
     <div class="topbar-center"><div class="topbar-search"><svg class="ui-icon" viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="search-input" type="search" aria-label="Tìm dự án" placeholder="Tìm tên hoặc mã dự án…" /></div></div>
-    <div class="topbar-right"><div class="health-pill" id="topbar-health" title="Trạng thái công cụ xử lý"><span class="pulse-dot"></span><span id="health-text">Đang kiểm tra…</span></div><span class="workspace-avatar" title="Không gian trên máy cục bộ">DL</span></div>
+    <div class="topbar-right"><div class="health-pill" id="topbar-health" title="Trạng thái công cụ xử lý"><span class="pulse-dot"></span><span id="health-text">Đang kiểm tra…</span></div><span class="workspace-avatar" title="Không gian trên máy cục bộ">NP</span></div>
   </header>
-  <div id="guide-modal" class="modal-backdrop" style="display:none"><section class="modal-card usage-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title"><div class="row-between"><h2 id="guide-title">Từ video nguồn đến thành phẩm</h2><button class="btn small" id="guide-close">Đóng</button></div><div class="guide-grid"><article><span class="guide-number">01</span><h3>Nhập và chuẩn bị</h3><p>Tạo dự án, tải video rồi chọn đúng vùng phụ đề trên khung hình.</p></article><article><span class="guide-number">02</span><h3>Dịch và duyệt</h3><p>Bóc phụ đề, kiểm tra nguồn, dịch tiếng Việt và duyệt nội dung từng cue.</p></article><article><span class="guide-number">03</span><h3>Tạo thành phẩm</h3><p>Tạo giọng, căn timing, render rồi kiểm tra QA kỹ thuật. QA đạt không thay thế duyệt nội dung.</p></article><article><span class="guide-number">04</span><h3>Lưu và giải phóng</h3><p>Kết nối tài khoản trong Kho cloud, upload nguyên MP4 và xác minh trước khi chủ động dọn bản trên máy.</p></article></div></section></div>
+  <div id="guide-modal" class="modal-backdrop" style="display:none">
+    <section class="modal-card usage-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+      <div class="row-between"><h2 id="guide-title">Hướng dẫn sử dụng</h2><button class="btn small" id="guide-close">Đóng</button></div>
+      <p class="muted">Telegram và Kho cloud cần kết nối Internet; trợ lý nhận lệnh khi ứng dụng trên máy tính đang mở. Chế độ Offline không chạy các tính năng này.</p>
+      <div class="guide-grid">
+        <article>
+          <span class="guide-number">01</span><h3>Chạy video qua Telegram Bot</h3>
+          <p>Bật Trợ lý Telegram và nhận lệnh hai chiều trong <strong>Kho cloud</strong>. Dán link <strong>Bilibili hoặc Douyin</strong> vào chat đã cấu hình: bot tự tạo dự án, chạy Auto và báo khi cần duyệt hoặc hoàn tất.</p>
+          <p>Muốn chọn cấu hình trước khi chạy: <strong>Menu → Tạo dự án</strong> (hoặc <code>/new</code>) → nhập link → đợi tải nguồn → chọn thành phẩm, nguồn dịch, mẫu phụ đề, giọng, tốc độ và mã hóa → xác nhận <strong>Chạy Auto</strong>. <code>/projects</code> mở danh sách phân trang; <code>/running</code> xem tiến độ; <code>/review</code> xem dự án cần xử lý. Máy tính và Studio phải đang mở.</p>
+          <p>Lệnh nhanh: <code>/status</code> xem trạng thái · <code>/list</code> xem 5 dự án gần nhất · <code>demo</code> xem thử · <code>đẩy youtube</code> tải Private · <code>dọn ổ D</code> yêu cầu dọn · <code>hủy</code> dừng tác vụ.</p>
+        </article>
+        <article>
+          <span class="guide-number">02</span><h3>Duyệt từ xa &amp; Xem Demo 2 phút</h3>
+          <p>Khi nhận thông báo <strong>VERIFIED</strong>, bấm <strong>🎬 Xem Demo 2 phút</strong> để xem ngay trên điện thoại. Đoạn trích dài tối đa 120 giây, tệp <strong>&lt; 35 MiB</strong>; xem xong có thể chọn <strong>📺 Đẩy YouTube Private</strong>.</p>
+          <p>Dừng ở cổng <strong>OCR</strong>: chọn duyệt nguồn, bỏ qua câu mơ hồ hoặc sửa trên Web. Cổng <strong>Timing/QA</strong>: có nút thử chạy tiếp Auto và nút Demo khi đã có MP4. QA kỹ thuật đạt vẫn cần bạn duyệt nội dung.</p>
+          <p>Ngay trên Telegram, bấm <strong>Mở dự án → Xem / sửa câu</strong> để xem khung hình, nghe giọng đã tạo và sửa nguồn/lời Việt. Nhập nội dung rồi xác nhận lưu; <code>/cancel</code> hủy nhập. Nếu dự án đã đổi trên Web, mở lại thẻ để lấy nút mới.</p>
+        </article>
+        <article>
+          <span class="guide-number">03</span><h3>Quản lý Kho Cloud</h3>
+          <p>Trong <strong>Kho cloud</strong>, kết nối OAuth Desktop lần đầu cho Google Drive và YouTube bằng tài khoản <strong>nhocnam2111@gmail.com</strong>. Với YouTube, mở Studio kiểm tra đúng tài khoản rồi xác nhận trên Web; kết nối lại thì xác nhận lại.</p>
+          <p><strong>☁️ Lưu Gói Nhẹ Drive</strong> giữ hồ sơ, phụ đề SRT và JSON, không chứa MP4. <strong>📺 Đẩy YouTube Private</strong> lưu video riêng tư; giới hạn và quota YouTube vẫn áp dụng. Kiểm tra bản đã tải trước khi xóa trên máy.</p>
+        </article>
+        <article>
+          <span class="guide-number">04</span><h3>Video 3–6 giờ &amp; Bảo vệ ổ D:</h3>
+          <p>Khi ổ dữ liệu còn khoảng <strong>30 GB</strong>, ưu tiên <strong>Compact</strong>; Telegram tự chọn chế độ này nếu còn dưới <strong>35 GiB</strong>. Video dài vẫn cần đủ dung lượng trong suốt quá trình xử lý.</p>
+          <p><strong>Auto Disk Guard</strong> mặc định kiểm tra trước khi nhận link mới, dọn khi còn dưới <strong>8 GiB</strong>: chỉ dự án VERIFIED, không chạy tác vụ và đã có bản sao MP4 hợp lệ. Gói nhẹ Drive không đủ điều kiện tự dọn.</p>
+          <p>Muốn chủ động dọn, bấm <strong>🧹 Xóa MP4 giải phóng ổ D</strong> hoặc gửi <code>dọn ổ D</code>, xem cảnh báo rồi bấm <strong>✅ Xác nhận Xóa ngay</strong>. Chỉ bước xác nhận mới xóa media nặng; SRT, JSON, kịch bản và SQLite được giữ lại.</p>
+          <p>Dự án lỗi có thể thử lại hoặc <strong>Xóa cả dự án</strong> từ thẻ Telegram sau khi dừng tác vụ. Đây là thao tác khác với giải phóng media: xác nhận sẽ xóa cả phụ đề, hồ sơ và bản ghi dự án trên máy; không tự xóa chỉ vì xử lý thất bại.</p>
+        </article>
+      </div>
+    </section>
+  </div>
   <div id="usage-modal" class="modal-backdrop" style="display:none">
     <section class="modal-card usage-panel" role="dialog" aria-modal="true" aria-labelledby="usage-title">
       <div class="row-between"><div><h2 id="usage-title">Sử dụng API</h2><p class="muted">Nhật ký Gemini từ khi bật theo dõi · Hôm nay theo UTC+7</p></div><button class="btn small" id="usage-close">Đóng</button></div>
@@ -62,13 +99,36 @@
   <main id="main-content" tabindex="-1">
     <!-- VIEW 1: DASHBOARD -->
     <section id="view-dashboard" class="view active">
-      <div class="row-between">
+      <header class="workspace-heading dashboard-heading">
         <div>
-          <h1>Không gian video của bạn</h1>
-          <p class="muted">Quản lý dự án, theo dõi xử lý và lưu thành phẩm — tất cả trong một nơi.</p>
+          <h1>Tổng quan dự án</h1>
+          <p>Tiến độ xử lý, việc cần duyệt và video đã xuất.</p>
         </div>
-        <div class="controls">
-          <select id="filter-status" style="width: auto; min-width: 190px;">
+        <button type="button" class="btn primary" id="dashboard-new-project"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"/></svg> Tạo dự án</button>
+      </header>
+
+      <div class="stats-grid" id="dashboard-stats" aria-live="polite">
+        <article class="stat-card tone-mint"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-grid"/></svg></span><div class="stat-info"><span class="stat-lbl">Tổng dự án</span><strong class="stat-val" id="stat-total">—</strong><small class="stat-note">Toàn bộ không gian làm việc</small></div></article>
+        <article class="stat-card tone-green"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-check"/></svg></span><div class="stat-info"><span class="stat-lbl">Đạt QA kỹ thuật</span><strong class="stat-val" id="stat-verified">—</strong><small class="stat-note">Duyệt nội dung được theo dõi riêng</small></div></article>
+        <article class="stat-card tone-blue"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-video"/></svg></span><div class="stat-info"><span class="stat-lbl">Tác vụ đang chạy</span><strong class="stat-val" id="stat-processing">—</strong><small class="stat-note">Đang chờ hoặc đang xử lý</small></div></article>
+        <article class="stat-card tone-violet"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-key"/></svg></span><div class="stat-info"><span class="stat-lbl">API Key</span><strong class="stat-val" id="dash-keys">—</strong><small class="stat-note">Trạng thái pool đã lưu</small></div></article>
+        <article class="stat-card tone-green"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-chart"/></svg></span><div class="stat-info"><span class="stat-lbl">Request hôm nay</span><strong class="stat-val" id="dash-requests">—</strong><small class="stat-note">Theo UTC+7 · Gemini trong ứng dụng</small></div></article>
+        <article class="stat-card tone-blue"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-token"/></svg></span><div class="stat-info"><span class="stat-lbl">Token hôm nay</span><strong class="stat-val" id="dash-tokens">—</strong><small class="stat-note">Đầu vào và đầu ra API đã báo</small></div></article>
+        <article class="stat-card tone-rose"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-clock"/></svg></span><div class="stat-info"><span class="stat-lbl">Độ trễ trung bình</span><strong class="stat-val" id="dash-latency">—</strong><small class="stat-note">Request hôm nay · thời gian API</small></div></article>
+        <article class="stat-card tone-violet"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-cloud"/></svg></span><div class="stat-info"><span class="stat-lbl">Bản video trên cloud</span><strong class="stat-val" id="dash-cloud">—</strong><small class="stat-note">Đã xác minh kích thước và checksum</small></div></article>
+      </div>
+      <p class="muted summary-caption" id="dashboard-summary-status">Đang đọc số liệu từ backend…</p>
+      <div class="dashboard-panels">
+        <section class="overview-panel"><div class="panel-heading"><h2>Phân bố trạng thái dự án</h2><span class="subtle-tag" title="Tỷ lệ số dự án ở từng nhóm trên tổng số dự án; không phải tiến độ của một video.">Theo trạng thái dự án</span></div><div id="dashboard-stages" class="stage-overview"><p class="muted">Chưa có dữ liệu.</p></div></section>
+        <section class="overview-panel"><div class="panel-heading"><h2>Việc cần chú ý</h2><svg class="ui-icon"><use href="#icon-check"/></svg></div><div id="dashboard-attention"><p class="muted">Đang đọc phụ đề từ database…</p></div><p class="panel-footnote">Số câu chưa xác nhận riêng có thể còn sau khi video đã qua QA kỹ thuật. Nút mở Studio theo bước hiện tại.</p></section>
+      </div>
+      <div class="section-heading"><div><h2>Dự án video</h2><p class="muted">Mở Studio để tiếp tục xử lý và duyệt từng công đoạn.</p></div><span class="subtle-tag" id="project-list-count">Đang tải…</span></div>
+      <div class="project-toolbar">
+        <label class="project-search-label" for="project-search">Tìm dự án
+          <input id="project-search" type="search" placeholder="Nhập tên hoặc mã dự án…" autocomplete="off" />
+        </label>
+        <div class="project-filter-actions">
+          <select id="filter-status" aria-label="Lọc trạng thái dự án">
             <option value="">Tất cả trạng thái</option>
             <option value="CREATED">1. Mới tạo (CREATED)</option>
             <option value="MEDIA_READY">2. Đã tải video (MEDIA_READY)</option>
@@ -87,57 +147,75 @@
           </button>
         </div>
       </div>
-
-      <div class="stats-grid" id="dashboard-stats" aria-live="polite">
-        <article class="stat-card tone-mint"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-grid"/></svg></span><div class="stat-info"><span class="stat-lbl">Tổng dự án</span><strong class="stat-val" id="stat-total">—</strong><small class="stat-note">Toàn bộ không gian làm việc</small></div></article>
-        <article class="stat-card tone-green"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-check"/></svg></span><div class="stat-info"><span class="stat-lbl">Đạt QA kỹ thuật</span><strong class="stat-val" id="stat-verified">—</strong><small class="stat-note">Duyệt nội dung được theo dõi riêng</small></div></article>
-        <article class="stat-card tone-blue"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-video"/></svg></span><div class="stat-info"><span class="stat-lbl">Tác vụ đang chạy</span><strong class="stat-val" id="stat-processing">—</strong><small class="stat-note">Đang chờ hoặc đang xử lý</small></div></article>
-        <article class="stat-card tone-violet"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-key"/></svg></span><div class="stat-info"><span class="stat-lbl">API Key</span><strong class="stat-val" id="dash-keys">—</strong><small class="stat-note">Trạng thái pool đã lưu</small></div></article>
-        <article class="stat-card tone-green"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-chart"/></svg></span><div class="stat-info"><span class="stat-lbl">Request hôm nay</span><strong class="stat-val" id="dash-requests">—</strong><small class="stat-note">Theo UTC+7 · Gemini trong ứng dụng</small></div></article>
-        <article class="stat-card tone-blue"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-token"/></svg></span><div class="stat-info"><span class="stat-lbl">Token hôm nay</span><strong class="stat-val" id="dash-tokens">—</strong><small class="stat-note">Đầu vào và đầu ra API đã báo</small></div></article>
-        <article class="stat-card tone-rose"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-clock"/></svg></span><div class="stat-info"><span class="stat-lbl">Độ trễ trung bình</span><strong class="stat-val" id="dash-latency">—</strong><small class="stat-note">Request hôm nay · thời gian API</small></div></article>
-        <article class="stat-card tone-violet"><span class="stat-icon"><svg class="ui-icon"><use href="#icon-cloud"/></svg></span><div class="stat-info"><span class="stat-lbl">Bản video trên cloud</span><strong class="stat-val" id="dash-cloud">—</strong><small class="stat-note">Đã xác minh kích thước và checksum</small></div></article>
+      <div id="project-selection" class="project-selection" hidden>
+        <strong id="project-selected-count"></strong>
+        <button type="button" class="btn small" id="project-clear-selection">Bỏ chọn tất cả</button>
+        <button type="button" class="btn small project-danger" id="project-delete-selected">Xóa đã chọn</button>
       </div>
-      <p class="muted summary-caption" id="dashboard-summary-status">Đang đọc số liệu từ backend…</p>
-      <div class="dashboard-panels">
-        <section class="overview-panel"><div class="panel-heading"><h2>Phân bố trạng thái dự án</h2><span class="subtle-tag" title="Tỷ lệ số dự án ở từng nhóm trên tổng số dự án; không phải tiến độ của một video.">Theo trạng thái dự án</span></div><div id="dashboard-stages" class="stage-overview"><p class="muted">Chưa có dữ liệu.</p></div></section>
-        <section class="overview-panel"><div class="panel-heading"><h2>Việc cần chú ý</h2><svg class="ui-icon"><use href="#icon-check"/></svg></div><div id="dashboard-attention"><p class="muted">Đang đọc phụ đề từ database…</p></div><p class="panel-footnote">QA kỹ thuật và duyệt nội dung là hai bước độc lập.</p></section>
-      </div>
-      <div class="section-heading"><div><h2>Dự án video</h2><p class="muted">Mở Studio để tiếp tục xử lý và duyệt từng công đoạn.</p></div><span class="subtle-tag" id="project-list-count">Đang tải…</span></div>
+      <p id="project-list-feedback" class="project-feedback" role="status" aria-live="polite" hidden></p>
       <!-- PROJECT TABLE -->
       <div class="table-wrap">
-        <table class="table">
+        <table class="table project-timing-table">
           <thead>
             <tr>
-              <th style="width: 140px;">Mã dự án</th>
-              <th>Tiêu đề video</th>
-              <th style="width: 120px; text-align: center;">Nền tảng</th>
-              <th style="width: 180px;">Giai đoạn (State)</th>
-              <th style="width: 140px;">Tiến độ</th>
+              <th class="project-check-cell"><input type="checkbox" id="project-select-page" aria-label="Chọn tất cả dự án trên trang này" /></th>
+              <th>Dự án</th>
+              <th>Trạng thái</th>
+              <th>Tiến độ</th>
+              <th>Bắt đầu</th>
+              <th>Xử lý thực</th>
+              <th>Chờ / gián đoạn</th>
+              <th>Chạy lỗi</th>
+              <th>Tổng thời gian</th>
               <th style="width: 130px; text-align: center;">Thao tác</th>
               <th style="width: 50px;"></th>
             </tr>
           </thead>
           <tbody id="project-rows">
-            <tr><td colspan="7" class="muted" style="text-align: center; padding: 36px;">Đang tải danh sách dự án…</td></tr>
+            <tr><td colspan="11" class="muted" style="text-align: center; padding: 36px;">Đang tải danh sách dự án…</td></tr>
           </tbody>
         </table>
       </div>
+      <div class="project-pagination" aria-label="Phân trang dự án">
+        <span id="project-page-summary" aria-live="polite"></span>
+        <label for="project-page-size">Mỗi trang <select id="project-page-size"><option>10</option><option>20</option><option>50</option></select></label>
+        <div class="project-page-controls">
+          <button type="button" class="btn small" id="project-page-prev" aria-label="Trang trước">← Trước</button>
+          <label for="project-page-number">Trang <input id="project-page-number" type="number" min="1" value="1" aria-label="Đi tới trang" /></label>
+          <span id="project-page-total"></span>
+          <button type="button" class="btn small" id="project-page-next" aria-label="Trang sau">Sau →</button>
+        </div>
+      </div>
+      <dialog id="project-delete-dialog" class="project-delete-dialog" aria-labelledby="project-delete-title" aria-describedby="project-delete-description">
+        <h2 id="project-delete-title">Xóa dự án?</h2>
+        <p id="project-delete-description"></p>
+        <ul id="project-delete-preview"></ul>
+        <p class="muted">Toàn bộ dữ liệu và tệp của các dự án này sẽ bị xóa vĩnh viễn, không thể hoàn tác. Dự án đang chạy được backend bảo vệ.</p>
+        <div class="project-dialog-actions">
+          <button type="button" class="btn" id="project-delete-cancel" autofocus>Giữ lại</button>
+          <button type="button" class="btn project-danger" id="project-delete-confirm">Xóa vĩnh viễn</button>
+        </div>
+      </dialog>
     </section>
 
     <!-- VIEW 2: NEW PROJECT -->
     <section id="view-new" class="view">
-      <div style="max-width: 700px; margin: 24px auto 0;">
-        <h1>Khởi Tạo Dự Án Fast Hardsub</h1>
-        <p class="muted">Nhập liên kết video từ TikTok, Douyin, Bilibili hoặc đường dẫn tệp MP4 cục bộ trên máy.</p>
+      <div class="new-project-layout">
+        <header class="workspace-heading">
+          <div>
+            <h1>Tạo dự án video</h1>
+            <p>Dán link Bilibili, Douyin, TikTok hoặc nhập đường dẫn tệp MP4.</p>
+          </div>
+        </header>
         
         <!-- BATCH / SINGLE TOGGLE -->
-        <div class="batch-tab-group" style="margin-top: 20px;">
-          <button type="button" class="batch-toggle-btn active" id="btn-mode-single">🔗 Nhập đơn lẻ (1 Video)</button>
-          <button type="button" class="batch-toggle-btn" id="btn-mode-batch">⚡ Hàng loạt (Batch Queue)</button>
-        </div>
-
-        <form id="form-new" class="card" style="padding: 30px; margin-top: 0;">
+        <form id="form-new" class="new-project-form">
+          <section class="card project-source-fields" aria-labelledby="project-source-title">
+          <h2 id="project-source-title">Nguồn video</h2>
+          <div class="batch-tab-group">
+            <button type="button" class="batch-toggle-btn active" id="btn-mode-single">Một video</button>
+            <button type="button" class="batch-toggle-btn" id="btn-mode-batch">Nhiều video</button>
+          </div>
           <div id="box-single-url">
             <label for="input-url">Đường dẫn video (URL) hoặc đường dẫn tệp MP4</label>
             <input 
@@ -158,26 +236,171 @@
             <p class="muted" style="margin: -6px 0 14px; font-size: 12px;">Hệ thống sẽ xếp các video vào hàng đợi xử lý Fast Hardsub.</p>
           </div>
           
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 22px;">
+          <div class="launch-source-platforms">
             <span class="badge badge-platform bilibili">📺 Bilibili (Ưu tiên H.264)</span>
             <span class="badge badge-platform douyin">◈ Douyin</span>
             <span class="badge badge-platform tiktok">♪ TikTok</span>
             <span class="badge badge-platform">📁 Tệp video cục bộ</span>
           </div>
 
-          <label>Chỉ xử lý một đoạn <span class="muted">(bỏ trống = trọn video)</span></label>
-          <div style="display: flex; gap: 10px; margin-bottom: 8px;">
-            <input id="input-trim-start" type="text" placeholder="Từ — ví dụ 5:00" style="flex: 1;" />
-            <input id="input-trim-end" type="text" placeholder="Đến — ví dụ 15:00" style="flex: 1;" />
+          <label for="launch-trim-mode">Phạm vi xử lý</label>
+          <select id="launch-trim-mode"><option value="full">Toàn bộ video</option><option value="segment">Chỉ đoạn đã chọn</option></select>
+          <div id="launch-trim-fields" hidden>
+          <div class="project-trim-fields">
+            <input id="input-trim-start" type="text" aria-label="Mốc bắt đầu" placeholder="Từ — ví dụ 5:00" />
+            <input id="input-trim-end" type="text" aria-label="Mốc kết thúc" placeholder="Đến — ví dụ 15:00" />
           </div>
-          <p class="muted" style="margin: 0 0 22px; font-size: 12px;">
+          <p class="muted launch-trim-hint">
             Nhập kiểu <code>5:00</code>, <code>1:05:30</code> hoặc số giây <code>300</code>.
           </p>
+          </div>
+          <div id="launch-preview-panel">
+            <button type="button" class="btn" id="launch-preview-load">Tải và xem video nguồn</button>
+            <a class="btn" id="launch-save-source" hidden>Tải MP4 về máy</a>
+            <p id="launch-preview-status" class="muted" aria-live="polite"></p>
+            <div id="launch-preview-editor" hidden>
+              <div class="launch-preview-surface">
+                <video id="launch-preview-video" controls playsinline preload="auto" style="display:block;width:100%"></video>
+                <img id="launch-preview-frame" alt="Khung hình nguồn để chọn vùng che" hidden style="width:100%;vertical-align:middle">
+                <div id="launch-preview-layer" style="position:absolute;inset:0;pointer-events:none;overflow:hidden"></div>
+              </div>
+              <div class="launch-timeline">
+                <input id="launch-seek" type="range" min="0" max="0" step="0.01" value="0" aria-label="Tua video">
+                <output id="launch-time">0:00 / 0:00</output>
+                <button type="button" class="btn" id="launch-play">Phát</button>
+                <label for="launch-speed">Tốc độ phát</label><select id="launch-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
+                <button type="button" class="btn" id="launch-in">Đặt điểm đầu</button>
+                <button type="button" class="btn" id="launch-out">Đặt điểm cuối</button>
+                <button type="button" class="btn" id="launch-clear-trim">Bỏ điểm cắt</button>
+                <button type="button" class="btn" id="launch-expand" aria-pressed="false">Phóng to khung xem</button>
+              </div>
+              <div class="launch-preview-actions"><label for="launch-brand">Vị trí logo và tên NpzzSub</label>
+              <select id="launch-brand"><option value="off">Tắt logo thủ công</option><option value="top_left">Trên trái</option><option value="top_right" selected>Trên phải</option><option value="bottom_left">Dưới trái</option><option value="bottom_right">Dưới phải</option></select>
+              <label for="launch-mask-method">Xử lý vùng khoanh</label><select id="launch-mask-method"><option value="blur">Làm mờ</option><option value="delogo">Xóa logo</option></select>
+              <button type="button" class="btn" id="launch-draw-mask">Khoanh vùng</button>
+              <button type="button" class="btn" id="launch-undo-mask">Bỏ vùng cuối</button>
+              </div>
+            </div>
+          </div>
+          </section>
 
-          <button type="submit" class="btn primary wide">
-            ⚡ Khởi tạo dự án Fast Hardsub
+          <!-- BẢNG CẤU HÌNH TỰ ĐỘNG CHUẨN SIRVIETSUB -->
+          <div class="card launch-options">
+            <div class="launch-options-header">
+              <div class="launch-options-title">
+                <span>Cấu hình xử lý</span>
+              </div>
+              <div class="launch-mode-picker">
+                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                  <input type="radio" name="run-mode" value="auto" id="mode-auto" checked />
+                  <strong>Tự động theo mục tiêu đã chọn</strong>
+                </label>
+                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                  <input type="radio" name="run-mode" value="manual" id="mode-manual" />
+                  <span class="muted">Thủ công từng bước (Studio)</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Panel tùy chọn tự động -->
+            <div id="auto-config-panel">
+              <section class="auto-option-group">
+                <h3>Bước 4 · Nhận dạng phụ đề</h3>
+                <div class="auto-option-fields">
+                  <div>
+                    <label for="auto-workflow-mode">Thành phẩm</label>
+                    <select id="auto-workflow-mode">
+                      <option value="dub">Giọng Việt + phụ đề Việt</option>
+                      <option value="subtitles">Phụ đề Việt · giữ tiếng gốc</option>
+                      <option value="voice_only">Chỉ lồng tiếng Việt · giữ hình gốc</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="auto-extraction-source">Nguồn để dịch</label>
+                    <select id="auto-extraction-source">
+                      <option value="screen">Đọc chữ trên hình</option>
+                      <option value="speech">Nghe lời thoại</option>
+                    </select>
+                  </div>
+                </div>
+                <small id="auto-source-note" aria-live="polite"></small>
+              </section>
+              <section class="auto-option-group">
+                <h3>Bước 6 · Hiển thị phụ đề</h3>
+                <div class="auto-option-fields">
+                  <div>
+                    <label for="auto-style">Mẫu phụ đề Việt</label>
+                    <select id="auto-style">
+                      <option value="preset:natural_blur" selected>Chữ trắng</option>
+                      <option value="preset:tiktok_yellow">🟡 TikTok Vàng Viền Đen (Montserrat Bold)</option>
+                      <option value="preset:modern_white">⚪ Trắng Hiện Đại Viền Đen (Montserrat)</option>
+                      <option value="preset:review_anton">🎞️ Review Phim Chuyên Nghiệp (Anton Dày Nét)</option>
+                      <option value="preset:cinematic_svn">⚔️ Phim Cổ Trang / Kiếm Hiệp (SVN-Times)</option>
+                      <option value="preset:instagram">📷 Phong Cách Reels / Instagram</option>
+                    </select>
+                  </div>
+                </div>
+              </section>
+              <section class="auto-option-group">
+                <h3>Bước 7 · Giọng đọc và âm thanh</h3>
+                <div class="auto-option-fields">
+                  <div>
+                    <label for="auto-audio-mix">Chế độ âm thanh</label>
+                    <select id="auto-audio-mix">
+                      <option value="mix" selected>Trộn: Giọng Việt 1.7x / Âm gốc (thoại + nhạc) 0.15x</option>
+                      <option value="voice_only">Chỉ lấy giọng tiếng Việt (Tắt âm gốc)</option>
+                      <option value="original_only">Chỉ lấy tiếng gốc (Không lồng tiếng)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="auto-voice">Giọng đọc AI</label>
+                    <select id="auto-voice">
+                      <option value="piper:ngochuyen" selected>🎙️ Ngọc Huyền (Nữ Review Phim - Siêu tốc)</option>
+                      <option value="piper:banmai">🎙️ Ban Mai (Nữ Miền Bắc thanh thoát)</option>
+                      <option value="piper:lacphi">🎙️ Lạc Phi (Nam Trầm Kiếm Hiệp)</option>
+                      <option value="piper:chieuthanh">🎙️ Chiêu Thanh (Nam Miền Nam ấm áp)</option>
+                      <option value="piper:manhdung">🎙️ Mạnh Dũng (Nam Phóng Sự tin tức)</option>
+                      <option value="piper:vais1000">🎙️ VAIS 1000 (Chuẩn Ngữ Âm)</option>
+                      <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Edge-TTS Online)</option>
+                      <option value="vi-VN-HoaiMyNeural">🎙️ Hoài My (Edge-TTS Online)</option>
+                      <option value="vieneu:ngoc_huyen_review_phim">🎙️ Ngọc Huyền (VieNeu GPU)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label for="auto-speed">Tốc độ đọc</label>
+                    <select id="auto-speed">
+                      <option value="+0%">1.0x (Chuẩn bình thường)</option>
+                      <option value="+10%">1.1x (Hơi nhanh)</option>
+                      <option value="+15%" selected>1.15x (Chuẩn Review Phim / TikTok)</option>
+                      <option value="+20%">1.2x (Nhanh, dồn dập)</option>
+                      <option value="+25%">1.25x (Rất nhanh)</option>
+                    </select>
+                  </div>
+                </div>
+              </section>
+              <section class="auto-option-group">
+                <h3>Bước 8 · Xuất video</h3>
+                <div class="auto-option-fields">
+                  <div>
+                    <label for="auto-processing-profile">Chế độ mã hóa</label>
+                    <select id="auto-processing-profile">
+                      <option value="fast">Nhanh — encode nhẹ</option>
+                      <option value="balanced" selected>Cân bằng — tốc độ vừa</option>
+                      <option value="compact">💾 Tiết kiệm dung lượng (Khuyên dùng video &gt;3 tiếng)</option>
+                      <option value="quality">Chất lượng hình cao — encode chậm hơn</option>
+                    </select>
+                  </div>
+                </div>
+                <small id="auto-export-note" aria-live="polite">Chế độ mã hóa điều chỉnh tốc độ và chất lượng xuất MP4.</small>
+              </section>
+            </div>
+          </div>
+
+          <div class="launch-footer"><button type="submit" class="btn primary wide launch-submit" id="btn-submit-action">
+            Bắt đầu xử lý
           </button>
           <p id="new-result" class="result"></p>
+          </div>
         </form>
       </div>
     </section>
@@ -189,10 +412,10 @@
       </div>
       
       <!-- HERO BANNER -->
-      <div class="row-between" style="align-items: flex-start; margin-bottom: 16px;">
-        <div style="flex: 1; min-width: 280px;">
-          <h1 id="detail-title" style="margin-bottom: 6px; word-break: break-word;">Chi tiết dự án</h1>
-          <div style="display: flex; align-items: center; gap: 10px;">
+      <div class="workspace-heading studio-heading">
+        <div class="studio-heading-copy">
+          <h1 id="detail-title">Chi tiết dự án</h1>
+          <div class="studio-project-meta">
             <span id="detail-stage" class="badge">CREATED</span>
             <span id="detail-meta-pill" class="muted" style="font-size: 13px;"></span>
           </div>
@@ -232,16 +455,16 @@
         <div class="step-node" id="step-node-4" data-step="4">
           <div class="step-num">4</div>
           <div class="step-meta">
-            <span class="step-title">RapidOCR</span>
-            <span class="step-sub">Bóc Sub Trung</span>
+            <span class="step-title">Nhận dạng</span>
+            <span class="step-sub">OCR / lời thoại</span>
           </div>
         </div>
         <div class="step-line" id="step-line-4"></div>
         <div class="step-node" id="step-node-5" data-step="5">
           <div class="step-num">5</div>
           <div class="step-meta">
-            <span class="step-title">Dịch Gemini</span>
-            <span class="step-sub">Batch 100–150 câu</span>
+            <span class="step-title">Dịch Việt</span>
+            <span class="step-sub">Dịch và duyệt</span>
           </div>
         </div>
         <div class="step-line" id="step-line-5"></div>
@@ -257,15 +480,15 @@
           <div class="step-num">7</div>
           <div class="step-meta">
             <span class="step-title">Giọng Việt</span>
-            <span class="step-sub">Edge TTS &amp; Slot</span>
+            <span class="step-sub">Căn lời</span>
           </div>
         </div>
         <div class="step-line" id="step-line-7"></div>
         <div class="step-node" id="step-node-8" data-step="8">
           <div class="step-num">8</div>
           <div class="step-meta">
-            <span class="step-title">Render NVENC</span>
-            <span class="step-sub">1-Pass GPU</span>
+            <span class="step-title">Render</span>
+            <span class="step-sub">Hình và tiếng</span>
           </div>
         </div>
         <div class="step-line" id="step-line-8"></div>
@@ -347,7 +570,7 @@
             </div>
 
             <!-- Timeline Step Controls -->
-            <div style="display: flex; gap: 6px; align-items: center; margin-top: 8px; justify-content: center;">
+            <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; justify-content: center;">
               <button class="btn small" id="btn-seek-back-5" title="Lùi 5 giây">-5s</button>
               <button class="btn small" id="btn-seek-back-1" title="Lùi 1 giây">-1s</button>
               <span id="roi-time-display" style="font-family: var(--font-mono); font-size: 12.5px; padding: 2px 8px;">00:00.00</span>
@@ -418,7 +641,7 @@
             </div>
 
             <div class="slider-row">
-              <label for="vol-original">Nhạc nền video gốc</label>
+              <label for="vol-original">Âm gốc video (gồm thoại và nhạc)</label>
               <input id="vol-original" type="range" min="0" max="0.5" step="0.01" value="0.15" />
               <span class="slider-value" id="vol-original-val">0.15×</span>
             </div>
@@ -436,14 +659,14 @@
         <!-- RIGHT COLUMN: STUDIO WORKFLOW & DATA PANELS (50%) -->
         <div class="right-col">
           <div class="studio-tabs">
-            <button class="studio-tab active" data-studio="workflow">📋 Quy trình 9 Bước</button>
-            <button class="studio-tab" data-studio="ocr">🔤 RapidOCR Cues</button>
-            <button class="studio-tab" data-studio="trans">🌐 Dịch Gemini</button>
-            <button class="studio-tab" data-studio="sub">🎨 Che &amp; Sub Việt</button>
-            <button class="studio-tab" data-studio="voice">🎙 Tạo Giọng</button>
-            <button class="studio-tab" data-studio="render">🎬 Render</button>
-            <button class="studio-tab" data-studio="verify">📦 Nghiệm Thu QA</button>
-            <button class="studio-tab" data-studio="logs">📊 Log</button>
+            <button class="studio-tab active" data-studio="workflow">Quy trình</button>
+            <button class="studio-tab" data-studio="ocr">Nhận dạng</button>
+            <button class="studio-tab" data-studio="trans">Dịch Việt</button>
+            <button class="studio-tab" data-studio="sub">Phụ đề</button>
+            <button class="studio-tab" data-studio="voice">Tạo giọng</button>
+            <button class="studio-tab" data-studio="render">Render</button>
+            <button class="studio-tab" data-studio="verify">Nghiệm thu</button>
+            <button class="studio-tab" data-studio="logs">Nhật ký</button>
           </div>
 
           <!-- TAB 1: 9-STEP WORKFLOW CARDS -->
@@ -456,6 +679,30 @@
                   <p class="muted" style="margin: 0; font-size: 12px;">Tuỳ chọn nâng cao sau khi đã tải video và chọn ROI. Luồng thủ công bên dưới được khuyến nghị.</p>
                 </div>
                 <button class="btn small" id="btn-run-all">Chạy tự động</button>
+                <button class="btn primary small" id="btn-resume-auto" hidden>Tiếp tục toàn bộ Auto</button>
+              </div>
+              <div class="auto-option-fields studio-auto-options">
+                <div>
+                  <label for="studio-workflow-mode">Mục tiêu Auto</label>
+                  <select id="studio-workflow-mode">
+                    <option value="custom" selected>Tùy chỉnh theo Studio</option>
+                    <option value="screen_subtitles">Chữ trên hình → sub Việt</option>
+                    <option value="speech_subtitles">Lời nói → sub Việt</option>
+                    <option value="screen_dub">Chữ trên hình → giọng + sub</option>
+                    <option value="screen_voice_only">Chỉ lồng tiếng Việt · giữ chữ Trung</option>
+                    <option value="speech_dub">Lời nói → giọng + sub</option>
+                    <option value="hybrid_dub">Hybrid thử nghiệm: phân vai lời nhạc / thoại</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="studio-processing-profile">Mã hóa video · Bước 8</label>
+                  <select id="studio-processing-profile">
+                    <option value="fast">Nhanh</option>
+                    <option value="balanced" selected>Cân bằng</option>
+                    <option value="compact">💾 Tiết kiệm dung lượng (Khuyên dùng video &gt;3 tiếng)</option>
+                      <option value="quality">Chất lượng hình cao</option>
+                  </select>
+                </div>
               </div>
             </div>
 
@@ -616,22 +863,28 @@
             <div class="card">
               <div class="row-between" style="margin-bottom: 12px;">
                 <div>
-                  <h2 style="margin: 0;">Danh Sách Câu Thoại Gốc (RapidOCR Cues)</h2>
+                  <h2 style="margin: 0;">Danh sách câu gốc (OCR / lời nói)</h2>
                   <span class="muted" style="font-size: 12px;" id="ocr-summary-text">Chưa có dữ liệu OCR.</span>
                 </div>
                 <div class="controls">
                   <button class="btn primary small" id="btn-ocr-run-tab">⚡ Chạy RapidOCR</button>
+                  <button type="button" class="btn small" id="btn-ocr-learning-report">Đề xuất học</button>
+                  <button type="button" class="btn small" id="btn-ocr-history">Lịch sử / hoàn tác</button>
                   <button class="btn small" id="btn-approve-ocr">✔ Phê duyệt OCR</button>
+                  <button class="btn small" id="btn-source-audio-review">Đối chiếu giọng gốc & chữ trên hình</button>
+                  <button class="btn small" id="btn-skip-uncertain">Bỏ qua câu chưa chắc</button>
+                  <label><input type="checkbox" id="auto-skip-uncertain" checked> Auto chốt câu nguồn bằng ảnh và lời nói</label>
                 </div>
               </div>
 
               <div id="ocr-review-filters" class="controls" aria-label="Lọc câu OCR" style="margin:12px 0">
                 <button class="btn small" data-ocr-filter="all" aria-pressed="true">Tất cả</button>
                 <button class="btn small" data-ocr-filter="pending" aria-pressed="false">Cần kiểm tra</button>
-                <button class="btn small" data-ocr-filter="confirmed" aria-pressed="false">Đã xác nhận</button>
+                <button class="btn small" data-ocr-filter="confirmed" aria-pressed="false">Có bản sửa / xác nhận</button>
+                <button class="btn small" data-ocr-filter="separated" aria-pressed="false">Đã tách chữ trong cảnh</button>
               </div>
               <p id="ocr-review-status" class="muted" role="status" aria-live="polite"></p>
-              <p class="muted" style="font-size:12px">Tiêu đề, bản quyền, watermark hoặc dòng không phải lời thoại: dùng <b>🗑 Xóa câu</b> để loại khỏi phụ đề.</p>
+              <p class="muted" style="font-size:12px">Confidence đo độ chắc khi đọc chữ; chữ rõ vẫn có thể nằm trên đồ vật hoặc là watermark. Auto thử đối chiếu ảnh và lời nói, rồi chốt hoặc loại có bằng chứng khi bật tùy chọn trên. Dùng <b>Bỏ qua câu chưa chắc</b> để xử lý danh sách hiện tại. Câu bị bỏ sẽ vắng trong sub và giọng Việt; nội dung gốc nằm trong <b>Lịch sử / hoàn tác</b>. Nếu muốn giữ đủ thoại, tắt tùy chọn và đối chiếu các câu trong <b>Cần kiểm tra</b>.</p>
               <dialog id="ocr-image-preview" style="max-width:94vw;border:1px solid var(--border);border-radius:12px;padding:20px">
                 <form method="dialog"><button class="btn small" style="float:right">Đóng ảnh ✕</button></form>
                 <p>Đối chiếu ảnh phụ đề gốc với chữ OCR</p>
@@ -639,7 +892,7 @@
               </dialog>
               <div class="cue-table-wrap">
                 <div class="cue-header-row cue-ocr-grid">
-                  <div>#</div>
+                  <div>Mã câu</div>
                   <div>Ảnh Crop</div>
                   <div>Thời Gian</div>
                   <div>Chữ Trung OCR (Có thể sửa)</div>
@@ -720,11 +973,20 @@
           <!-- TAB 4: CHE CHỮ TRUNG & ĐẶT SUB VIỆT -->
           <div id="studio-sub" class="studio-content">
             <div class="card">
-              <p class="hint">Mẫu theo ảnh: nền mờ tối, chữ trắng IN HOA, đậm nghiêng, dáng hẹp, viền đen. Chọn ROI đủ phủ phụ đề gốc.</p>
-              <button class="btn primary" id="sub-reference-preset">Áp dụng mẫu ảnh chuẩn</button>
+              <p class="hint">Làm mờ chữ gốc theo màu cảnh và đặt sub Việt độc lập. Chọn ROI đủ phủ chữ Trung trước khi xem thử.</p>
+              <button class="btn primary" id="sub-natural-blur-preset">Mờ tự nhiên theo màu video</button>
+              <p class="hint">Làm mờ chữ gốc, giữ màu cảnh phía sau. Sub Việt có thể nằm trong vùng mờ hoặc đặt riêng ở phía trên, dưới hay vị trí tùy chọn.</p>
+              <button class="btn primary" id="sub-reference-preset">Mẫu chữ Anton đậm nghiêng</button>
               <p class="hint">Mẫu v2 dùng Anton nét dày có sẵn trong ứng dụng, xiên nhẹ, viền đen. Nạp mẫu, xem thử rồi lưu. Chiều cao và vị trí dải che theo ROI.</p>
+              <div class="slider-row"><label for="sub-corner-logo">Logo góc của nguồn</label><select id="sub-corner-logo"><option value="keep">Giữ nguyên</option><option value="blur">Tự dò và làm mờ</option><option value="remove">Tự dò và xóa</option><option value="npzzsub">Tự dò và thay bằng NpzzSub</option></select></div>
+              <div class="slider-row"><label for="sub-brand-position">Thêm logo NpzzSub</label><select id="sub-brand-position"><option value="off">Tắt</option><option value="top_left">Trên trái</option><option value="top_right">Trên phải</option><option value="bottom_left">Dưới trái</option><option value="bottom_right">Dưới phải</option></select></div>
               <div class="slider-row"><label for="sub-cover-effect">Kiểu nền che</label><select id="sub-cover-effect"><option value="solid">Hộp màu</option><option value="blur">Làm mờ + phủ màu</option></select></div>
               <div class="slider-row"><label for="sub-blur">Độ làm mờ (px)</label><input id="sub-blur" type="number" min="1" max="100" value="24"></div>
+              <div class="slider-row"><label for="sub-blur-opacity">Độ phủ lớp mờ (0–1)</label><input id="sub-blur-opacity" type="number" min="0" max="1" step="0.05" value="1"></div>
+              <div class="slider-row"><label for="sub-position">Vị trí sub Việt</label><select id="sub-position"><option value="inside">Chồng lên vùng che/mờ</option><option value="above">Sát phía trên vùng mờ</option><option value="below">Sát phía dưới (nếu đủ chỗ)</option><option value="bottom">Sát đáy video</option><option value="custom">Tự chọn độ cao</option></select></div>
+              <div class="slider-row"><label for="sub-position-gap">Khoảng cách với vùng mờ (px)</label><input id="sub-position-gap" type="number" min="0" max="200" value="8"></div>
+              <div class="slider-row"><label for="sub-position-y">Độ cao tùy chọn (0 = trên, 1 = dưới)</label><input id="sub-position-y" type="number" min="0" max="1" step="0.01" value="0.9"></div>
+              <p class="hint">Độ phủ 1 làm mờ hoàn toàn; giảm xuống để thấy chữ gốc nhẹ hơn. Độ đậm màu phủ bằng 0 giữ màu video. Vị trí sub được giữ trong khung hình. Nếu vùng mờ sát đáy, chọn phía trên để tránh chồng chữ.</p>
               <div class="slider-row"><label for="sub-font-name">Font đã cài trên máy</label><input id="sub-font-name" value="Arial"></div>
               <div class="slider-row"><label for="sub-font-color">Màu chữ</label><input id="sub-font-color" type="color" value="#ffffff"></div>
               <div class="slider-row"><label for="sub-outline-color">Màu viền</label><input id="sub-outline-color" type="color" value="#000000"></div>
@@ -748,18 +1010,19 @@
                   <option value="fast_cover" selected>⚡ Fast Cover: Hộp nền vừa ROI + Sub Việt đè lên — nhanh nhất ⭐</option>
                   <option value="clean_and_place">🧹 Delogo nội suy + Sub Việt — chậm hơn, nên xem thử trước</option>
                   <option value="bilingual">🌐 Song ngữ (Bilingual): Giữ sub Trung, đặt sub Việt phía trên</option>
+                  <option value="original">Giữ hình gốc · không chèn phụ đề Việt</option>
                 </select>
                 <span></span>
               </div>
 
               <div class="slider-row">
-                <label for="cover-box-color">Màu hộp che</label>
+                <label for="cover-box-color">Màu phủ tùy chọn</label>
                 <input id="cover-box-color" type="color" value="#000000" style="width: 60px; height: 36px; padding: 2px; border: none; cursor: pointer;" />
                 <span class="slider-value">Tùy chỉnh</span>
               </div>
 
               <div class="slider-row">
-                <label for="cover-box-opacity">Độ mờ hộp che (Opacity)</label>
+                <label for="cover-box-opacity">Độ đậm màu phủ</label>
                 <input id="cover-box-opacity" type="range" min="0.0" max="1.0" step="0.05" value="1" />
                 <span class="slider-value" id="cover-box-opacity-val">1.00 (100%)</span>
               </div>
@@ -771,7 +1034,7 @@
               </div>
 
               <div class="slider-row">
-                <label for="sub-margin-v">Cách đáy khi song ngữ (trong ROI: căn giữa)</label>
+                <label for="sub-margin-v">Cách đáy khi song ngữ (vị trí mặc định)</label>
                 <input id="sub-margin-v" type="range" min="10" max="80" step="2" value="26" />
                 <span class="slider-value" id="sub-margin-v-val">26 px</span>
               </div>
@@ -793,8 +1056,15 @@
               <div class="slider-row">
                 <label for="voice-pick">Giọng đọc AI</label>
                 <select id="voice-pick" style="flex: 1;">
-                  <option value="vi-VN-NamMinhNeural" selected>🎙 Nam Minh (Nam) — Trầm ấm, dõng dạc [Tu Tiên / Kiếm Hiệp] ⭐</option>
-                  <option value="vi-VN-HoaiMyNeural">✨ Hoài My (Nữ) — Ngọt ngào, truyền cảm [Anime / Nữ Phụ / Hệ Thống]</option>
+                  <option value="piper:ngochuyen" selected>🎙️ Ngọc Huyền (Nữ Review Phim - Siêu tốc)</option>
+                  <option value="piper:banmai">🎙️ Ban Mai (Nữ Miền Bắc thanh thoát)</option>
+                  <option value="piper:lacphi">🎙️ Lạc Phi (Nam Trầm Kiếm Hiệp)</option>
+                  <option value="piper:chieuthanh">🎙️ Chiêu Thanh (Nam Miền Nam ấm áp)</option>
+                  <option value="piper:manhdung">🎙️ Mạnh Dũng (Nam Phóng Sự tin tức)</option>
+                  <option value="piper:vais1000">🎙️ VAIS 1000 (Chuẩn Ngữ Âm)</option>
+                  <option value="vi-VN-NamMinhNeural">🎙️ Nam Minh (Edge-TTS Online)</option>
+                  <option value="vi-VN-HoaiMyNeural">✨ Hoài My (Edge-TTS Online)</option>
+                  <option value="vieneu:ngoc_huyen_review_phim">🎙️ Ngọc Huyền (VieNeu GPU)</option>
                 </select>
                 <span></span>
               </div>
@@ -907,6 +1177,7 @@
               <div class="slider-row">
                 <label for="render-preset">Chế độ Render</label>
                 <select id="render-preset" style="flex: 1;">
+                  <option value="compact">💾 Tiết kiệm dung lượng (Khuyên dùng video &gt;3 tiếng)</option>
                   <option value="p4" selected>⚡ NVENC Fast (Preset p4, CRF 22) — Tối ưu tốc độ cao</option>
                   <option value="medium">⚖ NVENC Medium (Preset p5, CRF 20) — Cân bằng tốc độ / dung lượng</option>
                   <option value="hq">💎 NVENC HQ (Preset p6, CRF 18) — Chất lượng cao nhất</option>
@@ -923,6 +1194,25 @@
 
           <!-- TAB 7: NGHIỆM THU QA & XUẤT BẢN -->
           <div id="studio-verify" class="studio-content">
+            <div class="card" id="youtube-storage-panel">
+              <h2>📺 Lưu Trữ &amp; Đăng Nháp YouTube (Riêng Tư)</h2>
+              <p id="youtube-connection">Chưa đọc trạng thái kết nối.</p>
+              <div class="controls">
+                <button class="btn" id="youtube-connect">Kết nối YouTube</button>
+                <button class="btn" id="youtube-disconnect">Ngắt kết nối YouTube</button>
+                <label>Tiêu đề <select id="youtube-title-index"><option value="0">Tiêu đề #1</option><option value="1">Tiêu đề #2</option><option value="2">Tiêu đề #3</option></select></label>
+                <button class="btn primary" id="youtube-upload">🚀 Đẩy Lên YouTube (Private)</button>
+                <button class="btn" id="drive-metadata-upload">Lưu hồ sơ nhẹ lên Drive</button>
+                <button class="btn" id="storage-refresh">Làm mới trạng thái</button>
+              </div>
+              <p id="youtube-receipt"></p><p id="drive-receipt"></p><p id="storage-task-status" role="status"></p>
+              <p class="muted">YouTube xử lý lại video, không giữ bản MP4 gốc khớp byte; có giới hạn tài khoản, quota và thời lượng. Drive hồ sơ nhẹ chỉ giữ phụ đề/báo cáo, không bao gồm video. Biên nhận là xác nhận tại thời điểm tải, chưa kiểm tra lại từ xa.</p>
+            </div>
+            <div class="card"><p id="project-disk-usage">Dung lượng dự án: chưa đo</p>
+              <button class="btn" id="btn-disk-usage">Đo dung lượng</button>
+              <button class="btn" id="btn-release-media">🧹 Giải phóng dung lượng (Giữ Sub &amp; Kịch bản)</button>
+              <p class="muted">Xóa nguồn, video và giọng. Giữ phụ đề và báo cáo đã lưu; muốn xử lý hoặc nghiệm thu lại cần tải/tạo lại media.</p>
+            </div>
             <div class="card">
               <div class="row-between" style="margin-bottom: 12px;">
                 <h2>Báo Cáo Nghiệm Thu Chất Lượng (QA Verification)</h2>
@@ -944,10 +1234,20 @@
                   <span id="qa-metric-coverage" class="qa-pass">--</span>
                 </div>
                 <div class="qa-metric-row">
-                  <span>Tình trạng chuyển đổi dự phòng (Degraded):</span>
+                  <span>Chuẩn âm lượng web (LUFS / TruePeak):</span>
+                  <span id="qa-metric-audio" class="qa-warn">--</span>
+                </div>
+                <div class="qa-metric-row">
+                  <span>Duyệt nội dung:</span>
                   <span id="qa-metric-degraded" class="qa-pass">Không có suy hao</span>
                 </div>
               </div>
+              <details id="qa-content-review" hidden>
+                <summary></summary>
+                <pre style="max-height:20rem;overflow:auto;white-space:pre-wrap"></pre>
+              </details>
+
+              <div id="qa-messages-box" style="margin-top:10px;display:none" aria-live="polite"></div>
 
               <!-- Artifacts Download Section -->
               <h2 style="margin-top: 20px;">Các Tệp Thành Phẩm (Artifacts)</h2>
@@ -957,7 +1257,7 @@
                   <a id="link-download-video" class="btn small primary" href="#" download>Tải MP4</a>
                 </div>
                 <div class="download-item">
-                  <span>💬 Phụ Đề Việt Hoàn Chỉnh (SRT)</span>
+                  <span>💬 Phụ Đề Việt Căn Theo Giọng (vi.dub.srt)</span>
                   <a id="link-download-vi-srt" class="btn small" href="#" download>Tải SRT Việt</a>
                 </div>
                 <div class="download-item">
@@ -972,7 +1272,40 @@
                   <span>📋 Biên Bản Nghiệm Thu (JSON)</span>
                   <a id="link-download-verify" class="btn small" href="#" download>Tải Báo Cáo QA</a>
                 </div>
+                <div class="download-item"><span>📝 Phụ Đề Việt Theo Mốc Nguồn (vi.srt)</span><a id="link-download-vi-raw-srt" class="btn small" href="#" download>Tải SRT Việt</a></div>
+                <div class="download-item"><span>📦 Gói Nội Dung Đăng Kênh (JSON)</span><a id="link-download-publishing-pack" class="btn small" hidden download>Tải gói đăng bài</a></div>
               </div>
+              <section class="card" style="margin-top:20px" id="publishing-pack-panel">
+                <h2>🚀 Đóng Gói Nội Dung Đăng Kênh (YouTube / Shorts / Facebook)</h2>
+                <p class="muted">Bản nháp để duyệt và sao chép. Kiểm tra nội dung, lịch đăng và quyền sử dụng trước khi đăng kênh.</p>
+                <button class="btn small primary" id="btn-generate-pub-pack">✨ Tạo Nội Dung Đăng Bài</button>
+                <button class="btn small" id="btn-regenerate-pub-pack">🔄 Tạo Lại</button>
+                <label for="pub-part-duration">Thời lượng mỗi tập:</label>
+                <select id="pub-part-duration">
+                  <option value="120">2 phút - Shorts/TikTok</option>
+                  <option value="180" selected>3 phút - Chuẩn TikTok/Reels</option>
+                  <option value="300">5 phút - Facebook/Bilibili</option>
+                  <option value="600">10 phút - YouTube</option>
+                </select>
+                <p id="pub-pack-status" role="status">Chưa có gói đăng bài</p>
+                <h3>3 tiêu đề YouTube · tối đa 95 ký tự</h3>
+                <div id="pub-youtube-titles"></div>
+                <label for="pub-youtube-desc">Mô tả YouTube &amp; Shorts</label>
+                <textarea id="pub-youtube-desc" readonly rows="5" style="width:100%"></textarea>
+                <button class="btn small" id="btn-copy-yt-desc">📋 Copy Mô Tả YouTube</button>
+                <label for="pub-youtube-chapters">Mốc chương YouTube (Chapters · 00:00)</label>
+                <textarea id="pub-youtube-chapters" readonly rows="4" style="width:100%"></textarea>
+                <button class="btn small" id="btn-copy-yt-chapters">📋 Copy Mốc Chương</button>
+                <p id="pub-chapters-warning" class="muted" role="status"></p>
+                <h3>Bảng Chia Tập An Toàn (Không cắt ngang câu thoại)</h3>
+                <p class="muted">Điểm chia đề xuất bảo vệ mốc phụ đề và giọng đã xếp lịch. Lệnh FFmpeg dùng stream copy để cắt nhanh; vị trí hình có thể lệch theo keyframe. Kiểm tra thành phẩm trước khi đăng.</p>
+                <p id="pub-parts-warning" class="muted" role="status"></p>
+                <div id="pub-part-splits"></div>
+                <label for="pub-facebook-post">Bài đăng Facebook</label>
+                <textarea id="pub-facebook-post" readonly rows="7" style="width:100%"></textarea>
+                <button class="btn small" id="btn-copy-fb-post">📋 Copy Bài Đăng Facebook</button>
+                <p id="pub-hashtags"></p><button class="btn small" id="btn-copy-hashtags">📋 Copy Hashtag</button>
+              </section>
             </div>
           </div>
 
@@ -984,7 +1317,7 @@
             </div>
             <div class="card">
               <h2>Nhật Ký Hệ Thống</h2>
-              <div id="detail-logs" class="scroll muted">Chưa có nhật ký.</div>
+              <pre id="detail-logs" class="scroll muted" style="white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.6; padding: 12px; background: rgba(0,0,0,0.25); border-radius: 6px; max-height: 480px; overflow-y: auto;">Chưa có nhật ký.</pre>
             </div>
           </div>
 
@@ -1027,7 +1360,7 @@
       <div class="row-between"><div><h2 id="cloud-title">Kho video đám mây</h2><p class="muted">Google Drive · Giữ nguyên tệp MP4 · Chỉ dọn sau khi xác minh</p></div><button class="btn small" id="cloud-close">Đóng</button></div>
       <details id="cloud-setup"><summary>Thiết lập lần đầu: kết nối tài khoản Google</summary>
         <ol>
-          <li>Mở <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>, tạo/chọn project, bật <b>Google Drive API</b>.</li>
+          <li>Mở <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>, tạo/chọn project, bật <b>Google Drive API</b> và <b>YouTube Data API v3</b> nếu dùng YouTube.</li>
           <li>Trong Google Auth Platform, cấu hình Branding/Audience; nếu ứng dụng ở Testing, thêm email của bạn vào Test users.</li>
           <li>Tạo OAuth client loại <b>Desktop app</b>, tải tệp JSON. Đây là cấu hình ứng dụng, không phải mật khẩu Google.</li>
           <li>Chọn tệp bên dưới rồi bấm Kết nối Google Drive. Đăng nhập và cấp quyền trên trang Google.</li>
@@ -1039,10 +1372,29 @@
       <div class="controls cloud-controls"><button class="btn primary" id="cloud-connect">Kết nối Google Drive</button><button class="btn" id="cloud-disconnect">Ngắt kết nối trên máy</button><button class="btn" id="cloud-refresh">Làm mới</button><button class="btn" id="cloud-quota">Kiểm tra dung lượng Drive</button></div>
       <p id="cloud-account" aria-live="polite">Chưa đọc trạng thái kết nối.</p>
       <p id="cloud-message" aria-live="polite"></p>
+      <fieldset id="telegram-assistant-panel">
+        <legend>Trợ lý Telegram &amp; Bảo vệ ổ dữ liệu</legend>
+        <p id="telegram-assistant-status" aria-live="polite">Chưa đọc trạng thái Trợ lý.</p>
+        <div class="usage-filters">
+          <label><input type="checkbox" id="telegram-assistant-enabled" /> Bật Telegram</label>
+          <label><input type="checkbox" id="telegram-assistant-polling" /> Nhận lệnh hai chiều khi mở Studio</label>
+          <label>Bot token mới <input type="password" id="telegram-assistant-token" autocomplete="new-password" placeholder="Để trống để giữ cấu hình hiện tại" /></label>
+          <label>Chat ID mới <input type="password" id="telegram-assistant-chat" autocomplete="off" placeholder="Mã số chat được phép điều khiển" /></label>
+          <label><input type="checkbox" id="telegram-assistant-guard" /> Tự bảo vệ ổ dữ liệu</label>
+          <label>Ngưỡng trống (GiB)<input type="number" id="telegram-assistant-min-free" min="2" max="100" step="0.5" value="8" /></label>
+        </div>
+        <p class="muted">Tài khoản kho: nhocnam2111@gmail.com. Kết nối Google bằng các nút có sẵn. YouTube chưa cung cấp email qua OAuth hiện tại; kiểm tra đúng tài khoản trước khi xác nhận bên dưới. Không nhập token vào tin nhắn Telegram.</p>
+        <label><input type="checkbox" id="telegram-assistant-youtube-confirm" /> Tôi đã kiểm tra kết nối YouTube hiện tại là nhocnam2111@gmail.com.</label>
+        <div class="controls"><button class="btn" id="telegram-assistant-youtube-connect">Kết nối YouTube</button><a href="https://studio.youtube.com/" target="_blank" rel="noopener noreferrer">Kiểm tra tài khoản YouTube Studio</a><button class="btn primary" id="telegram-assistant-save">Lưu cấu hình</button><button class="btn" id="telegram-assistant-test">Gửi tin nhắn test</button><button class="btn" id="telegram-assistant-refresh">Làm mới Trợ lý</button></div>
+        <p id="telegram-assistant-message" aria-live="polite"></p>
+        <p class="muted">Tự dọn chỉ chọn dự án VERIFIED đang rảnh và có biên nhận khớp MP4 đầy đủ trên YouTube/Drive. Gói Drive nhẹ chỉ chứa hồ sơ, không thay thế video. Xóa thủ công trên Telegram cần xác nhận hai bước.</p>
+        <h3>Kho dự án đồng bộ với Telegram</h3>
+        <div id="telegram-assistant-library" class="usage-scroll"></div>
+      </fieldset>
       <p id="cloud-quota-text" class="muted">Dung lượng cloud: chưa đo. Dung lượng miễn phí dùng chung theo tài khoản Google.</p>
-      <label class="cloud-policy"><input type="checkbox" id="cloud-auto-upload" /> Tự tải thành phẩm lên Drive sau QA kỹ thuật (run-all hoặc nút QA).</label>
-      <p class="muted">Tự xóa đang tắt. “Giải phóng MP4” chỉ xóa đúng bản thành phẩm sau khi kiểm tra lại cloud và checksum; giữ nguồn, phụ đề, cache và database. Lưu cloud không đồng nghĩa đã duyệt nội dung.</p>
-      <div class="usage-filters"><label>Video<select id="cloud-project"><option value="">Chọn video</option></select></label><button class="btn primary" id="cloud-upload">Tải / tiếp tục lên Drive</button></div>
+      <label class="cloud-policy"><input type="checkbox" id="cloud-auto-upload" /> Tự lưu hồ sơ nhẹ lên Drive sau QA kỹ thuật (run-all hoặc nút QA).</label>
+      <p class="muted">Nút “Giải phóng MP4” của kho Drive chỉ xóa bản thành phẩm đã kiểm tra lại cloud/checksum. Auto Disk Guard ở trên có thể dọn cả media nặng của dự án đủ điều kiện; vẫn giữ phụ đề, kịch bản và database. Lưu cloud không đồng nghĩa đã duyệt nội dung.</p>
+      <div class="usage-filters"><label>Video<select id="cloud-project"><option value="">Chọn video</option></select></label><label>Gói lưu<select id="cloud-mode"><option value="metadata_only">Hồ sơ nhẹ (Sub &amp; báo cáo)</option><option value="full_delivery">MP4 đầy đủ (cần đủ dung lượng Drive)</option></select></label><button class="btn primary" id="cloud-upload">Tải / tiếp tục lên Drive</button></div>
       <div id="cloud-task" aria-live="polite"></div><button class="btn small" id="cloud-cancel-task" hidden>Dừng tác vụ cloud</button>
       <h3>Video đã lưu và đang tải</h3><div id="cloud-library"></div>
     </section>
@@ -1051,13 +1403,17 @@
   <script src="/upload-sha256.js?v=1"></script>
   <script src="/cleanup-admin.js?v=1"></script>
   <script src="/server-client.js?v=11"></script>
-  <script src="/app.js?v=4.3.0-recovery"></script>
+  <script src="/app.js?v=4.6.41"></script>
   <script src="/voices.js?v=2"></script>
   <script src="/recovery.js?v=2"></script>
+  <script src="/auto-workflow.js?v=12"></script>
   <script src="/voice-selection.js?v=3"></script>
   <script src="/voice-dictionary.js?v=1"></script>
   <script src="/cue-recrop.js?v=1"></script>
   <script src="/cloud.js?v=1"></script>
-  <script src="/shell.js?v=2"></script>
+  <script src="/shell.js?v=5"></script>
+  <script src="/personal.js?v=1"></script>
+  <script src="/ocr-learning.js?v=2"></script>
+  <script src="/source-audio-review.js?v=3"></script>
 </body>
 </html>

@@ -32,6 +32,25 @@ from src.providers.bilibili import BilibiliProvider
 from src.providers.douyin import DouyinProvider
 
 
+def test_metadata_duration_limit_logs_one_error(db_session, monkeypatch):
+    from src.database.models import Job, JobLog, Project, Source
+    from src.jobs.system import ProjectManager
+
+    db_session.add(Project(id='long'))
+    db_session.add(Job(id='job_long', project_id='long'))
+    db_session.add(Source(project_id='long', platform='bilibili',
+                          input_url='https://www.bilibili.com/video/BV17JeN6eE9M/'))
+    db_session.commit()
+    monkeypatch.setattr(settings, 'MAX_VIDEO_DURATION_SECONDS', 10800)
+    monkeypatch.setattr(BilibiliProvider, 'get_metadata',
+                       lambda self, url: VideoMetadata(platform='bilibili', duration=11331))
+    with pytest.raises(PipelineException) as exc:
+        ProjectManager().fetch_and_save_metadata('long')
+    assert exc.value.code == 'VIDEO_TOO_LONG'
+    assert db_session.query(JobLog).filter_by(job_id='job_long', level='ERROR',
+                                            error='VIDEO_TOO_LONG').count() == 1
+
+
 # ----------------- Existing Baseline Tests -----------------
 
 
@@ -223,6 +242,36 @@ def test_bilibili_qn_80_enforced_and_downgrade_rejected():
         assert called_params["fnval"] == 4048
 
 
+def test_bilibili_fallback_when_max_quality_is_720p():
+    """When source only has 720p (accept_quality=[64, 32, 16]), don't crash on qn=80; use 720p."""
+    provider = BilibiliProvider()
+    dummy_meta = VideoMetadata(
+        platform="bilibili",
+        video_id="BV1xx411c7mD",
+        source_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        extra={"cid": 123456},
+    )
+    mock_720p_resp = MagicMock()
+    mock_720p_resp.status_code = 200
+    mock_720p_resp.json.return_value = {
+        "code": 0,
+        "data": {
+            "quality": 64,
+            "accept_quality": [64, 32, 16],
+            "dash": {
+                "video": [{"id": 64, "baseUrl": "https://cdn.bilibili.com/720p.m4s", "codecid": 7, "codecs": "avc1"}],
+                "audio": [{"id": 30280, "baseUrl": "https://cdn.bilibili.com/audio.m4s", "bandwidth": 128000}],
+            },
+        },
+    }
+    with patch.object(provider, "get_metadata", return_value=dummy_meta), \
+         patch("requests.get", return_value=mock_720p_resp):
+        res = provider.get_media("https://www.bilibili.com/video/BV1xx411c7mD")
+        assert res.success is True
+        assert res.extra["quality"] == 64
+
+
+
 def test_bilibili_avc_selection_dash():
     """Verify AVC/H.264 (codecid=7, avc1) is prioritized over HEVC (12) and AV1 (13)."""
     provider = BilibiliProvider()
@@ -289,6 +338,61 @@ def test_bilibili_avc_selection_dash():
         assert "https://backup.bilibili.com/1080p_avc.m4s" in media_src.backup_urls
 
 
+def test_bilibili_412_fallback_to_wbi_or_html_playinfo():
+    """Verify Bilibili HTTP 412 on legacy playurl falls back to signed WBI or HTML playinfo."""
+    provider = BilibiliProvider()
+    dummy_meta = VideoMetadata(
+        platform="bilibili",
+        video_id="BV1xx411c7mD",
+        source_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        extra={"cid": 123456},
+    )
+
+    resp_412 = MagicMock()
+    resp_412.status_code = 412
+
+    resp_nav = MagicMock()
+    resp_nav.status_code = 200
+    resp_nav.json.return_value = {
+        "code": 0,
+        "data": {
+            "wbi_img": {
+                "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+            }
+        },
+    }
+
+    resp_wbi = MagicMock()
+    resp_wbi.status_code = 200
+    resp_wbi.json.return_value = {
+        "code": 0,
+        "data": {
+            "quality": 80,
+            "dash": {
+                "video": [{"id": 80, "baseUrl": "https://cdn.bilibili.com/1080p.m4s", "codecid": 7, "codecs": "avc1"}],
+                "audio": [{"id": 30280, "baseUrl": "https://cdn.bilibili.com/audio.m4s", "bandwidth": 128000}],
+            },
+        },
+    }
+
+    def mock_get(url, *args, **kwargs):
+        if "wbi/playurl" in str(url):
+            assert "w_rid" in kwargs.get("params", {})
+            return resp_wbi
+        if "web-interface/nav" in str(url):
+            return resp_nav
+        if "player/playurl" in str(url):
+            return resp_412
+        return resp_412
+
+    with patch.object(provider, "get_metadata", return_value=dummy_meta), \
+         patch("requests.get", side_effect=mock_get):
+        media_src = provider.get_media("https://www.bilibili.com/video/BV1xx411c7mD")
+        assert media_src.success
+        assert media_src.video_url == "https://cdn.bilibili.com/1080p.m4s"
+
+
 def test_mirror_range_probe_and_selection():
     """Verify small Range request probe benchmarks mirrors and prioritizes the fastest."""
     # Mirror 1: Slow / fails
@@ -310,6 +414,18 @@ def test_mirror_range_probe_and_selection():
     with patch.object(DownloadManager, "_get", side_effect=mock_requests_get):
         ranked = select_best_mirrors(candidates, headers={}, sample_bytes=65536, timeout=1.0)
         assert "fast.bilivideo.com" in ranked[0]
+
+
+def test_large_mirror_probe_requires_exact_range():
+    response = MagicMock(status_code=206)
+    response.headers = {"Content-Range": "bytes 0-524287/2097152"}
+    response.iter_content.return_value = [b"a" * 524288]
+    with patch.object(DownloadManager, "_get", return_value=response) as get:
+        url = "https://test.bilivideo.com/video.m4s"
+        assert not probe_single_mirror(url, {}, sample_bytes=524288)[0]
+        assert get.call_args.args[1]["Range"] == "bytes=1048576-1572863"
+        response.headers["Content-Range"] = "bytes 1048576-1572863/2097152"
+        assert probe_single_mirror(url, {}, sample_bytes=524288)[0]
 
 
 def test_adaptive_range_downloader_chunks_and_resume(tmp_path):
@@ -365,17 +481,17 @@ def test_dash_parallel_download_and_mux_copy(tmp_path):
     )
 
     # Mock probe
-    with patch.object(mgr, "_probe_url", side_effect=[
-        (True, 10 * 1024 * 1024, "https://test.bilivideo.com/video_1080p.m4s"),
-        (True, 2 * 1024 * 1024, "https://test.bilivideo.com/audio.m4s"),
-    ]), \
-         patch("src.download.manager.select_best_mirrors", side_effect=lambda urls, hdrs: urls), \
+    def probe_track(url, headers):
+        return True, (10 if url == media_src.video_url else 2) * 1024 * 1024, url
+
+    with patch.object(mgr, "_probe_url", side_effect=probe_track), \
+         patch("src.download.manager.select_best_mirrors", side_effect=lambda urls, hdrs, **kwargs: urls) as rank_mirrors, \
          patch.object(AdaptiveRangeDownloader, "download_range", return_value=True), \
          patch("src.download.manager.mux_video_audio_copy") as mock_mux, \
          patch("src.download.manager.validate_download") as mock_val:
 
         # Mock mux writing the target file
-        def fake_mux(v, a, out):
+        def fake_mux(v, a, out, duration_seconds=None):
             out.write_bytes(b"dummy muxed 1080p video")
             return out
         mock_mux.side_effect = fake_mux
@@ -395,6 +511,7 @@ def test_dash_parallel_download_and_mux_copy(tmp_path):
 
         res = mgr.download(media_src, target_path, validation_mode="fast")
         assert res.success
+        rank_mirrors.assert_any_call([media_src.video_url], media_src.headers, sample_bytes=512 * 1024, max_probes=3)
         assert mock_mux.called
         # Verify FFmpeg -c copy mux was called with both temp tracks
         v_arg, a_arg, out_arg = mock_mux.call_args.args
@@ -465,6 +582,27 @@ def test_range_resumes_short_response_and_verifies_completed_chunk(tmp_path):
         assert downloader.download_range(**arguments)
         assert network.called
     assert arguments['part_path'].read_bytes() == payload
+
+
+def test_four_mib_range_reuses_verified_two_mib_checkpoint(tmp_path):
+    payload = b"a" * (2 * 1024**2) + b"b"
+    url = "https://test.bilivideo.com/stream"
+    part = tmp_path / "stream.part"
+
+    def get(url, headers, **kwargs):
+        start, end = map(int, headers["Range"][6:].split("-"))
+        response = MagicMock(status_code=206)
+        response.headers = {"Content-Range": f"bytes {start}-{end}/{len(payload)}"}
+        response.iter_content.return_value = [payload[start:end + 1]]
+        return response
+
+    args = (url, {}, len(payload), part, tmp_path / "stream.src")
+    with patch.object(DownloadManager, "_get", side_effect=get):
+        assert AdaptiveRangeDownloader().download_range(*args)
+    with patch.object(DownloadManager, "_get") as network:
+        assert AdaptiveRangeDownloader(initial_chunk_size=4 * 1024**2).download_range(*args)
+        network.assert_not_called()
+    assert part.read_bytes() == payload
 
 
 @pytest.mark.parametrize('failure', ['short', 'wrong_range', 'oversized'])

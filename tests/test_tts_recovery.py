@@ -264,3 +264,72 @@ def test_permanent_no_audio_uses_three_actual_requests_not_nested_retries(tmp_pa
     assert requests.call_count == 3
     assert failure.value.details['cue_indices'] == [41]
     assert len(failure.value.details['failures']) == 3
+
+
+def test_orchestrator_recovers_from_partial_edge_failures_by_reducing_concurrency(tmp_path):
+    from src.pipeline.orchestrator import PipelineOrchestrator
+    from src.pipeline.state_machine import PipelineState, ProjectState
+    runner = PipelineOrchestrator()
+    state = PipelineState(current_state=ProjectState.TRANSLATION_REVIEWED)
+    cues = [
+        Cue(index=1, start=0, end=1, vi_text='Câu một'),
+        Cue(index=2, start=1.5, end=2.5, vi_text='Câu hai'),
+        Cue(index=3, start=3, end=4, vi_text='Câu ba'),
+    ]
+    attempts = []
+    def fake_synthesize(cues, output_dir, **kwargs):
+        attempts.append(len(attempts))
+        if len(attempts) == 1:
+            raise PipelineException(
+                'TTS_FAILED',
+                'Đã có 2/3 giọng hợp lệ; 1 câu lỗi. Chạy tiếp để tạo phần còn thiếu.',
+                details={'retryable': False, 'cue_indices': [2],
+                         'failures': [{'cue_index': 2, 'error_chain': ['EdgeSynthesisError', 'NoAudioReceived']}]}
+            )
+        wav = output_dir / 'voiceover/voiceover.wav'
+        timeline = output_dir / 'voiceover/timeline.json'
+        wav.parent.mkdir(parents=True, exist_ok=True)
+        wav.write_bytes(audio())
+        timeline.write_text('[]', encoding='utf-8')
+        for c in cues:
+            c.voice_audio_path = f'voiceover/cues/cue_{c.index}.wav'
+            cue_wav = output_dir / c.voice_audio_path
+            cue_wav.parent.mkdir(parents=True, exist_ok=True)
+            cue_wav.write_bytes(audio())
+        return {
+            'timeline': [{'cue_index': c.index, 'start': c.start, 'end': c.end, 'drift': 0.0} for c in cues],
+            'voiceover_wav': str(wav),
+        }
+
+    with patch.object(runner, 'get_state', return_value=state), \
+         patch.object(runner, 'get_cues', return_value=cues), \
+         patch.object(runner, 'get_project_dir', return_value=tmp_path), \
+         patch.object(runner, 'save_state'), \
+         patch.object(runner, 'save_cues'), \
+         patch.object(AudioTimelineBuilder, 'synthesize_cues', side_effect=fake_synthesize):
+        res = runner.run_voiceover('p', voice='vi-VN-NamMinhNeural')
+    assert len(attempts) == 2
+    assert res['recovery_attempts'] == 1
+
+
+def test_edge_tts_sanitizes_punctuation_on_no_audio_received():
+    """EdgeTTSProvider retries with cleaned punctuation when Microsoft returns NoAudioReceived."""
+    import edge_tts
+    provider = EdgeTTSProvider()
+    calls = []
+    def fake_synthesize_async(text, voice, rate, pitch, boundary):
+        calls.append((text, boundary))
+        if len(calls) == 1:
+            raise edge_tts.exceptions.NoAudioReceived('No audio was received.')
+        # Second attempt with cleaned punctuation succeeds
+        return audio()
+
+    with patch.object(provider, '_synthesize_async', side_effect=fake_synthesize_async), \
+         patch('time.sleep'):
+        raw_bytes, dur = provider.synthesize('Người anh em, mau đến giúp đi chứ.', voice='vi-VN-NamMinhNeural')
+    assert len(calls) == 2
+    assert calls[0][0] == 'Người anh em, mau đến giúp đi chứ.'
+    assert calls[1][0] == 'Người anh em, mau đến giúp đi chứ'
+    assert len(raw_bytes) > 0
+
+

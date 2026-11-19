@@ -12,9 +12,7 @@ from src.database.connection import SessionLocal
 from src.database.models import Job, Project, JobStatus
 from src.jobs.logger import SystemErrorCodes, PipelineException, TaskCancelled
 
-_current_task_var: contextvars.ContextVar[Optional["QueuedTask"]] = contextvars.ContextVar(
-    "_current_task_var", default=None
-)
+from src.jobs.process_ownership import current_task_var as _current_task_var
 
 # Hook subprocess.Popen to automatically track running processes for the active task
 _orig_popen_init = subprocess.Popen.__init__
@@ -50,6 +48,7 @@ class QueuedTask:
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
     finished_at: Optional[float] = None
+    timing_initial_stage: Optional[str] = None
     progress_events: List[Dict[str, Any]] = field(default_factory=list)
     future: Optional[Future] = field(default=None, repr=False)
     subprocesses: List[Any] = field(default_factory=list, repr=False)
@@ -102,14 +101,14 @@ class QueuedTask:
     def kill_subprocesses(self) -> None:
         """Kill all tracked child processes when task is cancelled or terminates."""
         with self._proc_lock:
-            procs = list(self.subprocesses)
-        for proc in procs:
-            try:
-                if hasattr(proc, "poll") and proc.poll() is None:
-                    proc.kill()
-            except Exception:
-                pass
-        with self._proc_lock:
+            # Serialize cancellation with lease release. A copied stale list
+            # must not kill a worker after another task has acquired it.
+            for proc in list(self.subprocesses):
+                try:
+                    if hasattr(proc, "poll") and proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
             self.subprocesses.clear()
 
 
@@ -127,7 +126,7 @@ class JobQueue:
         )
         self._tasks: Dict[str, QueuedTask] = {}
         self._by_project: Dict[str, str] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def submit(
         self,
@@ -164,6 +163,8 @@ class JobQueue:
             task.journaled=True
 
         with self._lock:
+            if task.job_id and self._current_job_id(project_id) != task.job_id:
+                raise PipelineException(SystemErrorCodes.UNKNOWN_ERROR, f"Dự án {project_id} không còn khả dụng.")
             # Hai công đoạn chạy song song trên cùng một dự án sẽ ghi đè lẫn nhau
             # (cùng tệp .part, cùng thư mục đích) nên chỉ cho phép một tác vụ mỗi lúc
             active_id = self._by_project.get(project_id)
@@ -184,10 +185,30 @@ class JobQueue:
                     self._tasks.pop(task_id,None)
                     self._by_project.pop(project_id,None)
                     raise
+            from src.jobs.project_timing import save_task
+            save_task(task)
 
-        task.future = self._executor.submit(
-            self._run, task, func, inject_cancel, *args, **kwargs
-        )
+        try:
+            task.future = self._executor.submit(
+                self._run, task, func, inject_cancel, *args, **kwargs
+            )
+        except Exception:
+            # Submission can fail during shutdown or thread exhaustion. Do not
+            # leave a QUEUED task owning the project without any runnable future.
+            with self._lock:
+                task.state = 'FAILED'
+                task.finished_at = time.time()
+                task.error_code = 'TASK_SUBMISSION_FAILED'
+                task.error_message = 'Không khởi động được tác vụ nền; hãy thử lại khi hệ thống sẵn sàng.'
+                if self._by_project.get(project_id) == task_id:
+                    if active_id:
+                        self._by_project[project_id] = active_id
+                    else:
+                        self._by_project.pop(project_id, None)
+                save_task(task)
+                if task.journaled:
+                    save(task, force=True)
+            raise
         return task
 
     def _current_job_id(self, project_id: str) -> Optional[str]:
@@ -204,7 +225,7 @@ class JobQueue:
         from config.settings import settings
         from src.jobs.resources import TaskInterrupted,check_disk,storage_reason
         from src.pipeline.attempts import execution_start
-        heavy=settings.SERVER_MODE and task.action.lower() in {'ocr','voiceover','render','run-all','run_all','remix'}
+        heavy=(settings.SERVER_MODE or settings.PIPELINE_SERIALIZE_HEAVY_TASKS) and task.action.lower() in {'ocr','voiceover','render','run-all','run_all','remix','source-audio-review'}
         acquired=False;token=None;actor_token=None;storage_failed=False;reader_lease=None
         monitor_stop=threading.Event();monitor=None
         def continue_work():
@@ -226,11 +247,13 @@ class JobQueue:
                 while not self._heavy_slot.acquire(timeout=.2):
                     if task.cancel_requested:raise TaskCancelled()
                     if task.interrupted_reason_code:raise TaskInterrupted(task.interrupted_reason_code)
-                    task.record_progress(0,'Chờ tài nguyên máy chủ')
+                    task.record_progress(0,'Chờ lượt xử lý nặng · giữ tài nguyên cho dự án đang chạy')
                 acquired=True
             if task.cancel_requested:raise TaskCancelled()
             if task.interrupted_reason_code:raise TaskInterrupted(task.interrupted_reason_code)
             task.state='RUNNING';task.started_at=time.time();token=_current_task_var.set(task)
+            from src.jobs.project_timing import save_task
+            save_task(task)
             if settings.SERVER_MODE:
                 from src.server.readers import read_guard
                 lease=read_guard(settings.storage_path/task.project_id);lease.__enter__();reader_lease=lease
@@ -239,7 +262,7 @@ class JobQueue:
             else:self._mark_job(task.job_id,JobStatus.PROCESSING.value,error_code='',error_message='')
             check_disk(start=True)
             task.record_progress(task.progress,task.action,force=True)
-            if heavy:
+            if heavy and (settings.SERVER_MODE or settings.PERSONAL_MODE and settings.AUTO_DISK_GUARD_ENABLED):
                 def monitor_resources():
                     while not monitor_stop.wait(.5):
                         try:check_disk()
@@ -277,9 +300,12 @@ class JobQueue:
                 storage_failed=storage_failed or bool(storage_reason(write_error))
                 import logging;logging.getLogger(__name__).error('Cannot persist terminal task state: %s',type(write_error).__name__)
         finally:
+            task.finished_at=time.time()
             monitor_stop.set()
             if monitor:monitor.join(timeout=2)
-            task.finished_at=time.time();task.kill_subprocesses()
+            task.kill_subprocesses()
+            from src.jobs.project_timing import save_task
+            save_task(task)
             if reader_lease:reader_lease.__exit__(None,None,None)
             # Release scarce resources before attempting any final journal write.
             if acquired:self._heavy_slot.release()
@@ -290,6 +316,8 @@ class JobQueue:
             if not storage_failed:
                 try:
                     labels={'DONE':'Hoàn tất','FAILED':'Thất bại','CANCELLED':'Đã hủy','INTERRUPTED':'Bị gián đoạn — kiểm tra để tiếp tục'}
+                    if task.error_code == SystemErrorCodes.OCR_REVIEW_REQUIRED:
+                        labels['FAILED'] = 'Cần duyệt OCR'
                     task.record_progress(100 if task.state=='DONE' else task.progress,labels.get(task.state,task.stage),force=True)
                 except Exception:
                     import logging;logging.getLogger(__name__).error('Final journal unavailable; in-memory terminal state retained')
@@ -313,6 +341,11 @@ class JobQueue:
                     raise TaskInterrupted('STALE_ATTEMPT','Lượt chạy không còn quyền đổi trạng thái Job.')
                 if status=='COMPLETED' and job.status=='CANCELLED':raise TaskCancelled()
                 job.status = status
+                if (status == 'COMPLETED' and active and active.action in {'run-all', 'run_all'}
+                        and isinstance(active.result, dict)
+                        and (active.result.get('verification') or {}).get('passed') is True):
+                    job.current_stage = 'VERIFIED'
+                    job.progress = 100
                 if status=='INTERRUPTED':
                     job.interrupted_reason_code=error_code;job.interrupted_stage=active.interrupted_stage if active else job.current_stage
                     job.retained_summary={'message':'Giữ kết quả hoàn tất và cache phù hợp; không tự chạy lại.'}
@@ -374,6 +407,8 @@ class JobQueue:
         if task.future is not None and task.future.cancel():
             task.state = "CANCELLED"
             task.finished_at = time.time()
+            from src.jobs.project_timing import save_task
+            save_task(task)
             task.record_progress(task.progress, "Đã huỷ", force=True)
             self._mark_job(task.job_id, JobStatus.CANCELLED.value)
         else:
@@ -391,6 +426,8 @@ class JobQueue:
         task.kill_subprocesses()
         if task.future and task.future.cancel():
             task.state='INTERRUPTED';task.error_code='USER_PAUSE';task.error_message='Người dùng tạm dừng.';task.finished_at=time.time()
+            from src.jobs.project_timing import save_task
+            save_task(task)
             self._mark_job(task.job_id,'INTERRUPTED',error_code='USER_PAUSE',error_message=task.error_message)
         if task.journaled:
             from src.server.tasks import save

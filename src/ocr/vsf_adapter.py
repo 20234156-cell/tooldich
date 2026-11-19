@@ -1,6 +1,7 @@
 """VideoSubFinder adapter with seamless fallback to internal CueDetector."""
 
 import logging
+import math
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from config.settings import settings
+from src.jobs.resources import media_timeout
 from src.jobs.logger import TaskCancelled
 from src.jobs.resources import check_disk,TaskInterrupted,storage_reason
 from src.ocr.base import Cue
@@ -73,6 +75,27 @@ def _stop_process(proc):
             proc.wait(timeout=5)
 
 
+class _ReviewOCR:
+    def __init__(self, adapter, engine):
+        self.adapter = adapter
+        self.engine = engine
+        self.cache_version = f'{engine.cache_version}:review-cpu-fallback-v1'
+
+    def read_boxes(self, image, *, preprocess=False):
+        from src.ocr.gpu_client import OCRGPUError
+
+        try:
+            return self.engine.read_boxes(image, preprocess=preprocess)
+
+        except OCRGPUError:
+            self.adapter._use_cpu()
+            self.engine = self.adapter._ocr_engine
+            return self.engine.read_boxes(image, preprocess=preprocess)
+
+    def close(self):
+        self.adapter.release_ocr()
+
+
 class VideoSubFinderAdapter:
     """Adapter for VideoSubFinder CLI with automated fallback to OpenCV CueDetector."""
 
@@ -81,16 +104,45 @@ class VideoSubFinderAdapter:
         self.fallback_detector = CueDetector()
         self.warnings: List[str] = []
         self.engine = 'vsf-rapidocr'
+        self._ocr_engine = None
+        self._prefix_scans = {}
+
+    def _recognizer(self, should_continue=None):
+        if self._ocr_engine is None:
+            from src.ocr.gpu_client import GPUOCREngine, validated_runtime
+            runtime = validated_runtime()
+            self._ocr_engine = GPUOCREngine(runtime, should_continue) if runtime else RapidOCREngine()
+        from src.ocr.gpu_client import GPUOCREngine
+        if isinstance(self._ocr_engine, GPUOCREngine):
+            self._ocr_engine.should_continue = should_continue
+            self.engine = 'vsf-rapidocr-cuda'
+        return self._ocr_engine
 
     def get_executable(self) -> Optional[Path]:
         """Locate VideoSubFinder executable if installed."""
         return _find_vsf(self.vsf_path)
+
+    def review_recognizer(self, should_continue=None):
+        engine = self._recognizer(should_continue)
+        return _ReviewOCR(self, engine)
+
+    def release_ocr(self):
+        from src.ocr.gpu_client import GPUOCREngine
+        if isinstance(self._ocr_engine, GPUOCREngine):
+            self._ocr_engine.close()
+        elif isinstance(self._ocr_engine, RapidOCREngine):
+            # CPU fallback owns ONNX sessions in the parent process. Release
+            # them too; RapidOCR lazily initializes again for later evidence.
+            self._ocr_engine._engine = None
 
     @staticmethod
     def scan_cache_key(video_path: Path, roi: ROIBox, start_time=0.0, max_duration=None, vsf_path=None):
         stat = video_path.stat()
         with video_path.open('rb') as stream:
             source_sha256 = hashlib.file_digest(stream,'sha256').hexdigest()
+        after = video_path.stat()
+        if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns, after.st_ino):
+            raise TaskInterrupted('SOURCE_CHANGED', 'Nguồn thay đổi trong khi kiểm tra identity.')
         binary=_find_vsf(vsf_path or settings.VSF_PATH)
         binary_hash=settings_hash=None
         if binary:
@@ -104,7 +156,36 @@ class VideoSubFinderAdapter:
                 "duration": max_duration, "proxy_width": settings.VSF_PROXY_WIDTH,
                 "proxy": settings.VSF_USE_SCAN_PROXY}
 
-    def extract_cues(
+    def extract_cues(self, *args, **kwargs):
+        from src.ocr.gpu_client import OCRGPUError
+
+        try:
+            return self._extract_cues(*args, **kwargs)
+        except OCRGPUError:
+            self._use_cpu()
+            return self._extract_cues(*args, **kwargs)
+
+    def _use_cpu(self):
+        self.release_ocr()
+        self._ocr_engine = RapidOCREngine()
+        self.engine = 'vsf-rapidocr'
+        self.warnings.append('RapidOCR GPU gặp lỗi; đã chuyển sang CPU.')
+
+    def _prefix_key(self, video_path: Path, roi: ROIBox):
+        return (
+            str(video_path.resolve()),
+            round(float(roi.x), 6),
+            round(float(roi.y), 6),
+            round(float(roi.width), 6),
+            round(float(roi.height), 6),
+        )
+
+    @staticmethod
+    def _video_stamp(video_path: Path):
+        st = video_path.stat()
+        return (st.st_size, st.st_mtime_ns)
+
+    def _run_scan_pass(
         self,
         video_path: Path,
         roi: ROIBox,
@@ -113,35 +194,17 @@ class VideoSubFinderAdapter:
         max_duration: Optional[float] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
         should_continue: Optional[Callable[[], bool]] = None,
+        cache_key=None,
     ) -> List[Cue]:
-        """Extract hardsub cues using VideoSubFinder if available, otherwise use CueDetector fallback."""
-        cache_key = self.scan_cache_key(video_path, roi, start_time, max_duration, self.vsf_path) if video_path.is_file() else None
-        manifest = output_dir / "vsf_scan.json"
-        if cache_key and manifest.is_file():
-            try:
-                saved = json.loads(manifest.read_text(encoding="utf-8"))
-                if not isinstance(saved, dict):
-                    raise ValueError('VSF manifest must be an object')
-                images = list((output_dir / "RGBImages").glob("*"))
-                if saved.get("key") == cache_key and saved.get("image_count", 0) > 0 and len(images) == saved["image_count"]:
-                    logger.info("Reusing completed VSF scan; recognizing existing subtitle frames")
-                    cues = self.recognize_vsf_images(output_dir, progress_callback, should_continue)
-                    offset = float(saved.get("time_offset", 0))
-                    for cue in cues:
-                        cue.start = round(cue.start + offset, 3)
-                        cue.end = round(cue.end + offset, 3)
-                    return deduplicate_cues(cues)
-            except (OSError, ValueError, TypeError):
-                logger.warning("Ignoring invalid VSF scan manifest")
+        """Run one scan pass (VSF or internal CueDetector fallback) over [start_time, +max_duration)."""
         vsf_bin = self.get_executable()
-
         if vsf_bin is not None:
             logger.info(f"VideoSubFinder binary found at {vsf_bin}, attempting VSF extraction")
-            # If VSF execution succeeds, parse results; if not or fails, fallback
             scan_video = video_path
             scan_start = start_time
             scan_duration = max_duration
             proxy_path: Optional[Path] = None
+            keep_proxy = False
             try:
                 if getattr(settings, "VSF_USE_SCAN_PROXY", True):
                     proxy_path = self._create_scan_proxy(
@@ -151,6 +214,7 @@ class VideoSubFinderAdapter:
                         max_duration=max_duration,
                         progress_callback=progress_callback,
                         should_continue=should_continue,
+                        source_identity=cache_key,
                     )
                     if proxy_path is not None:
                         scan_video = proxy_path
@@ -174,21 +238,28 @@ class VideoSubFinderAdapter:
                 if cues:
                     return deduplicate_cues(cues)
             except Exception as e:
-                if isinstance(e,TaskInterrupted) or storage_reason(e):raise
+                from src.ocr.gpu_client import OCRGPUError
+                if isinstance(e, (OCRGPUError, TaskCancelled, TaskInterrupted)) or storage_reason(e):
+                    keep_proxy = True
+                    raise
                 check_disk()
                 if should_continue and not should_continue():
                     raise TaskCancelled("Đã huỷ bóc sub theo yêu cầu") from e
                 logger.warning(f"VideoSubFinder execution failed: {e}. Falling back to internal CueDetector.")
                 self.warnings.append("VideoSubFinder gặp lỗi; đã chuyển sang dò thay đổi khung hình bằng OpenCV.")
             finally:
-                if proxy_path is not None:
+                if proxy_path is not None and not keep_proxy:
                     try:
-                        proxy_path.unlink(missing_ok=True)
+                        from src.ocr.proxy_cache import discard
+                        discard(proxy_path)
                     except OSError:
                         logger.warning("Could not remove VSF scan proxy: %s", proxy_path)
 
         logger.info("Using internal CueDetector (frame difference + RapidOCR)")
         self.engine = 'opencv-rapidocr'
+        self.fallback_detector.ocr_engine = self._recognizer(should_continue)
+        if self.engine == 'vsf-rapidocr-cuda':
+            self.engine = 'opencv-rapidocr-cuda'
         if vsf_bin is None:
             self.warnings.append("Không tìm thấy VideoSubFinder; dùng dò thay đổi khung hình bằng OpenCV.")
         raw_cues = self.fallback_detector.detect_cues(
@@ -197,10 +268,159 @@ class VideoSubFinderAdapter:
             output_dir=output_dir,
             start_time=start_time,
             max_duration=max_duration,
-            progress_callback=progress_callback,
+            progress_callback=(lambda pct, msg: progress_callback(5 + int(67 * pct / 100), msg))
+            if progress_callback else None,
             should_continue=should_continue,
         )
         return deduplicate_cues(raw_cues)
+
+    def _merge_delta_scan(
+        self,
+        prev: dict,
+        delta_cues: List[Cue],
+        prev_end: float,
+        output_dir: Path,
+        delta_dir: Path,
+    ) -> List[Cue]:
+        """Combine already-recognized prefix cues with delta-range cues without re-OCR."""
+        evidence_dir = output_dir / "cues"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        prev_dir = Path(prev["output_dir"])
+        merged: List[Cue] = []
+        seq = 0
+        for cue in prev["cues"]:
+            copied = cue.model_copy(deep=True)
+            seq += 1
+            if copied.image_path:
+                src_img = prev_dir / copied.image_path
+                if src_img.is_file():
+                    dst_name = f"cue_{seq:04d}{src_img.suffix.lower() or '.png'}"
+                    dst_img = evidence_dir / dst_name
+                    if src_img.resolve() != dst_img.resolve():
+                        shutil.copy2(src_img, dst_img)
+                    copied.image_path = f"cues/{dst_name}"
+            merged.append(copied)
+        for cue in delta_cues:
+            if cue.end <= prev_end:
+                continue
+            copied = cue.model_copy(deep=True)
+            if copied.start < prev_end:
+                copied.start = round(prev_end, 3)
+            seq += 1
+            if copied.image_path:
+                src_img = delta_dir / copied.image_path
+                if src_img.is_file():
+                    dst_name = f"cue_{seq:04d}{src_img.suffix.lower() or '.png'}"
+                    shutil.copy2(src_img, evidence_dir / dst_name)
+                    copied.image_path = f"cues/{dst_name}"
+            merged.append(copied)
+        for sub_name in ("RGBImages", "TXTImages", "ILAImages"):
+            dst_sub = output_dir / sub_name
+            for src_root in (prev_dir, delta_dir):
+                src_sub = src_root / sub_name
+                if src_sub.is_dir() and src_sub.resolve() != dst_sub.resolve():
+                    dst_sub.mkdir(parents=True, exist_ok=True)
+                    for item in src_sub.iterdir():
+                        if item.is_file():
+                            shutil.copy2(item, dst_sub / item.name)
+        deduped = deduplicate_cues(merged)
+        for idx, cue in enumerate(deduped, 1):
+            cue.index = idx
+        return deduped
+
+    def _extract_cues(
+        self,
+        video_path: Path,
+        roi: ROIBox,
+        output_dir: Path,
+        start_time: float = 0.0,
+        max_duration: Optional[float] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
+    ) -> List[Cue]:
+        """Extract hardsub cues using VideoSubFinder if available, reusing scanned sample prefixes."""
+        cache_key = self.scan_cache_key(video_path, roi, start_time, max_duration, self.vsf_path) if video_path.is_file() else None
+        manifest = output_dir / "vsf_scan.json"
+        if cache_key and manifest.is_file():
+            try:
+                saved = json.loads(manifest.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    raise ValueError('VSF manifest must be an object')
+                images = list((output_dir / "RGBImages").glob("*"))
+                if saved.get("key") == cache_key and saved.get("image_count", 0) > 0 and len(images) == saved["image_count"]:
+                    logger.info("Reusing completed VSF scan; recognizing existing subtitle frames")
+                    from src.ocr.proxy_cache import discard
+                    discard(output_dir / '_vsf_scan_proxy.mp4')
+                    cues = self.recognize_vsf_images(output_dir, progress_callback, should_continue)
+                    offset = float(saved.get("time_offset", 0))
+                    for cue in cues:
+                        cue.start = round(cue.start + offset, 3)
+                        cue.end = round(cue.end + offset, 3)
+                    return deduplicate_cues(cues)
+            except (OSError, ValueError, TypeError):
+                logger.warning("Ignoring invalid VSF scan manifest")
+
+        prefix_key = self._prefix_key(video_path, roi) if video_path.is_file() else None
+        if prefix_key is not None and start_time == 0.0:
+            prev = self._prefix_scans.get(prefix_key)
+            current_stamp = self._video_stamp(video_path)
+            if (
+                prev is not None
+                and prev["stamp"] == current_stamp
+                and prev["end"] > 0
+                and (max_duration is None or max_duration > prev["end"])
+                and Path(prev["output_dir"]).is_dir()
+            ):
+                prev_end = float(prev["end"])
+                delta_duration = (float(max_duration) - prev_end) if max_duration is not None else None
+                delta_dir = output_dir / "_delta_scan"
+                shutil.rmtree(delta_dir, ignore_errors=True)
+                delta_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    delta_cues = self._run_scan_pass(
+                        video_path=video_path,
+                        roi=roi,
+                        output_dir=delta_dir,
+                        start_time=prev_end,
+                        max_duration=delta_duration,
+                        progress_callback=progress_callback,
+                        should_continue=should_continue,
+                        cache_key=None,
+                    )
+                    merged_cues = self._merge_delta_scan(prev, delta_cues, prev_end, output_dir, delta_dir)
+                finally:
+                    shutil.rmtree(delta_dir, ignore_errors=True)
+                if max_duration is not None:
+                    self._prefix_scans[prefix_key] = {
+                        "end": float(max_duration),
+                        "output_dir": Path(output_dir),
+                        "cues": [c.model_copy(deep=True) for c in merged_cues],
+                        "stamp": current_stamp,
+                    }
+                else:
+                    self._prefix_scans.pop(prefix_key, None)
+                return merged_cues
+
+        cues = self._run_scan_pass(
+            video_path=video_path,
+            roi=roi,
+            output_dir=output_dir,
+            start_time=start_time,
+            max_duration=max_duration,
+            progress_callback=progress_callback,
+            should_continue=should_continue,
+            cache_key=cache_key,
+        )
+        if prefix_key is not None and start_time == 0.0 and max_duration is not None and max_duration > 0:
+            self._prefix_scans[prefix_key] = {
+                "end": float(max_duration),
+                "output_dir": Path(output_dir),
+                "cues": [c.model_copy(deep=True) for c in cues],
+                "stamp": self._video_stamp(video_path),
+            }
+        elif prefix_key is not None and start_time == 0.0 and max_duration is None:
+            self._prefix_scans.pop(prefix_key, None)
+        return cues
 
     def _create_scan_proxy(
         self,
@@ -210,8 +430,10 @@ class VideoSubFinderAdapter:
         max_duration: Optional[float],
         progress_callback: Optional[Callable[[int, str], None]] = None,
         should_continue: Optional[Callable[[], bool]] = None,
+        source_identity=None,
     ) -> Optional[Path]:
         """Create a low-resolution scan proxy; return None when unnecessary or unavailable."""
+        proxy_started = time.perf_counter()
         proxy_width = max(480, int(getattr(settings, "VSF_PROXY_WIDTH", 960)))
         cap = cv2.VideoCapture(str(video_path))
         try:
@@ -235,27 +457,43 @@ class VideoSubFinderAdapter:
 
         output_dir.mkdir(parents=True, exist_ok=True)
         proxy_path = output_dir / "_vsf_scan_proxy.mp4"
-        proxy_path.unlink(missing_ok=True)
         base_cmd = [
-            str(ffmpeg_bin), "-hide_banner", "-loglevel", "error", "-y",
+            str(ffmpeg_bin), "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-filter_threads", str(settings.VSF_PROXY_FILTER_THREADS),
             "-progress", "pipe:1", "-nostats",
-            "-ss", f"{max(0.0, start_time):.3f}", "-i", str(video_path),
         ]
+        input_args = ["-ss", f"{max(0.0, start_time):.3f}", "-i", str(video_path)]
+        output_args = ["-an"]
         if max_duration is not None:
-            base_cmd.extend(["-t", f"{max(0.001, max_duration):.3f}"])
-        base_cmd.extend(["-an", "-vf", f"scale={proxy_width}:-2"])
+            output_args.extend(["-t", f"{max(0.001, max_duration):.3f}"])
+        nvenc = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "26", "-rc", "vbr"]
+        x264 = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+        from src.gpu import nvenc_available
 
-        encoder_variants = [
-            ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "26", "-rc", "vbr"],
-            ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"],
-        ]
-        if progress_callback:
-            progress_callback(2, f"Đang tạo proxy {proxy_width}px để tăng tốc dò phụ đề...")
+        # Preserve the software scaler's pixels. The CUDA scaler changed
+        # several recognized glyphs on a measured subtitle source.
+        scale = f"scale={proxy_width}:-2"
+        variants = [nvenc, x264] if nvenc_available(str(ffmpeg_bin)) else [x264]
+        from src.ocr import proxy_cache
+        key = proxy_cache.identity(source_identity, ffmpeg_bin, scale, variants, settings.VSF_PROXY_FILTER_THREADS)
+        source_stamp = proxy_cache.file_stamp(video_path) if video_path.is_file() else None
+        if source_identity and source_stamp is not None and 'mtime_ns' in source_identity:
+            if source_stamp[:2] != (source_identity['size'], source_identity['mtime_ns']):
+                raise TaskInterrupted('SOURCE_CHANGED', 'Nguồn thay đổi trước khi tạo proxy.')
+        if proxy_cache.reuse(proxy_path, key):
+            if should_continue and not should_continue():
+                raise TaskCancelled('Đã dừng trước khi dùng lại proxy.')
+            if progress_callback:
+                progress_callback(4, 'Dùng lại proxy hoàn tất: nguồn và checksum khớp')
+            return proxy_path
+        proxy_cache.discard(proxy_path)
 
-        for enc_args in encoder_variants:
+        for enc_args in variants:
+            if progress_callback:
+                progress_callback(2, f"Tạo video quét nhanh (Proxy {proxy_width}px, {enc_args[1]})")
             encoded = [0.0]
             proc = subprocess.Popen(
-                base_cmd + enc_args + [str(proxy_path)],
+                base_cmd + input_args + output_args + ["-vf", scale] + enc_args + [str(proxy_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -276,7 +514,7 @@ class VideoSubFinderAdapter:
             error_reader.start()
             scan_duration = min(max_duration, max(0, source_duration-start_time)) if max_duration is not None else max(0, source_duration-start_time)
             last_reported = -1.0
-            deadline = time.monotonic() + settings.FFMPEG_TIMEOUT_SECONDS
+            deadline = time.monotonic() + media_timeout(settings.FFMPEG_TIMEOUT_SECONDS, scan_duration)
             try:
                 while proc.poll() is None:
                     check_disk()
@@ -288,7 +526,7 @@ class VideoSubFinderAdapter:
                         last_reported = encoded[0]
                         ratio = min(1.0, encoded[0] / scan_duration) if scan_duration else 0
                         progress_callback(2 + min(2, int(ratio * 3)),
-                            f"Đang chuẩn bị video dò phụ đề {proxy_width}px: "
+                            f"Tạo video quét nhanh (Proxy {proxy_width}px): "
                             f"{encoded[0]:.0f}/{scan_duration:.0f} giây ({ratio*100:.0f}%)")
                     time.sleep(0.2)
             except BaseException:
@@ -300,6 +538,18 @@ class VideoSubFinderAdapter:
                 error_reader.join(timeout=2)
             stderr = ''.join(errors)
             if proc.returncode == 0 and proxy_path.is_file() and proxy_path.stat().st_size > 0:
+                if source_stamp is not None and proxy_cache.file_stamp(video_path) != source_stamp:
+                    proxy_cache.discard(proxy_path)
+                    raise TaskInterrupted('SOURCE_CHANGED', 'Nguồn thay đổi trong khi tạo proxy; hãy nhận dạng lại.')
+                proxy_cache.publish(proxy_path, key)
+                from src.translation.memory import atomic_json
+                atomic_json(output_dir / 'vsf_proxy.json', {
+                    'decoder': 'software', 'filter': scale, 'encoder_args': enc_args,
+                    'filter_threads': settings.VSF_PROXY_FILTER_THREADS,
+                    'elapsed_seconds': round(time.perf_counter() - proxy_started, 3),
+                    'source_duration': source_duration, 'requested_start': start_time,
+                    'requested_duration': max_duration,
+                })
                 logger.info("Created %sp VSF scan proxy with %s", proxy_width, enc_args[1])
                 return proxy_path
             logger.warning("VSF proxy encoder %s failed: %s", enc_args[1], stderr[:300])
@@ -370,7 +620,7 @@ class VideoSubFinderAdapter:
                 shutil.rmtree(stale_dir, ignore_errors=True)
         (output_dir / "vsf_scan.json").unlink(missing_ok=True)
         if progress_callback:
-            progress_callback(5, "Đang khởi động VideoSubFinder quét khung hình...")
+            progress_callback(5, "Dò mốc phụ đề (VideoSubFinder): đang khởi động")
 
         proc = subprocess.Popen(
             cmd,
@@ -385,7 +635,7 @@ class VideoSubFinderAdapter:
         for reader in readers:reader.start()
 
         timeout_seconds = getattr(settings, "FFMPEG_TIMEOUT_SECONDS", 1800)
-        start_ts = time.time()
+        start_ts = time.perf_counter()
         cap = cv2.VideoCapture(str(video_path))
         try:
             source_duration = (
@@ -395,6 +645,7 @@ class VideoSubFinderAdapter:
         finally:
             cap.release()
         scan_end = start_time + max_duration if max_duration else source_duration
+        timeout_seconds = media_timeout(timeout_seconds, max(0, scan_end-start_time))
 
         try:
             while proc.poll() is None:
@@ -402,7 +653,7 @@ class VideoSubFinderAdapter:
                 if should_continue and not should_continue():
                     raise TaskCancelled("Đã dừng VideoSubFinder theo yêu cầu")
 
-                elapsed = time.time() - start_ts
+                elapsed = time.perf_counter() - start_ts
                 if elapsed > timeout_seconds:
                     raise TimeoutError(f"VideoSubFinder quá thời gian chờ ({timeout_seconds}s)")
 
@@ -424,10 +675,11 @@ class VideoSubFinderAdapter:
                             latest_time = max(latest_time, parsed[1])
                     if scan_end > start_time and latest_time > start_time:
                         scan_ratio = min(1.0, (latest_time - start_time) / (scan_end - start_time))
-                        pct = 5 + int(scan_ratio * 35)
+                        pct = 5 + int(scan_ratio * 34)
                     else:
                         pct = 5
-                    progress_callback(pct, f"VideoSubFinder đang dò phụ đề (đã thấy {found_count} khung hình xuất hiện chữ)...")
+                    progress_callback(pct, f"Dò mốc phụ đề (VideoSubFinder): {found_count} ảnh, "
+                                      f"{max(0, pct-5)*100//34}% nguồn quét")
 
                 time.sleep(0.8)
 
@@ -439,7 +691,8 @@ class VideoSubFinderAdapter:
             completed = not new_native_error and (
                 proc.returncode == 0 or (legacy_wxw and proc.returncode in {-1,4294967295} and sentinel))
             (output_dir/'vsf_process.json').write_text(json.dumps({
-                'exit_code':proc.returncode,'elapsed_seconds':round(time.time()-start_ts,3),
+                'exit_code':proc.returncode,'elapsed_seconds':round(time.perf_counter()-start_ts,3),
+                'arguments':cmd[1:],'image_count':len(list(rgb_dir.glob('*'))),
                 'stdout_tail':stdout,'stderr_tail':stderr,'completion_sentinel':sentinel,
                 'known_legacy_wxw':legacy_wxw,'completed':completed,
                 'native_error':new_native_error.decode('utf-8',errors='replace')[-3000:]},ensure_ascii=False),encoding='utf-8')
@@ -469,7 +722,7 @@ class VideoSubFinderAdapter:
         txt_dir = output_dir / "TXTImages"
         rgb_dir = output_dir / "RGBImages"
         # RapidOCR recognition
-        engine = RapidOCREngine()
+        engine = self._recognizer(should_continue)
         evidence_dir = output_dir / "cues"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         cues: List[Cue] = []
@@ -480,64 +733,55 @@ class VideoSubFinderAdapter:
         })
 
         total = len(candidates)
+        started_at = time.perf_counter()
+        duplicate_count = cache_hits = recognized = 0
+        recognized_by_engine = {}
+        gpu_fallbacks = 0
+        if progress_callback:
+            progress_callback(40, f"Đọc chữ lần 1 (RapidOCR: 0/{total} ảnh)")
         if total == 0:
             if progress_callback:
-                progress_callback(95, "Không phát hiện khung hình chứa chữ trong vùng ROI đã chọn")
+                progress_callback(72, "Không phát hiện khung hình chứa chữ trong vùng ROI đã chọn")
             return cues
 
+        import importlib.metadata
+        try:engine_version=importlib.metadata.version('rapidocr-onnxruntime')
+        except importlib.metadata.PackageNotFoundError:engine_version='unknown'
+        distribution_version = engine_version
+        runtime_version = getattr(engine, 'cache_version', None)
+        if isinstance(runtime_version, str):
+            engine_version += ':' + runtime_version
+        cache_root=settings.storage_path.parent/'ocr_cache';cache_root.mkdir(parents=True,exist_ok=True)
         prev_hash: Optional[int] = None
         prev_image: Optional[np.ndarray] = None
-        for idx, image_path in enumerate(candidates):
-            check_disk()
-            if should_continue and not should_continue():
-                raise TaskCancelled("Đã dừng trong lúc nhận diện OCR")
+        pending_cache_writes: List[tuple] = []
 
-            if progress_callback:
-                pct = 40 + int(((idx + 1) / total) * 55)
-                if idx % 2 == 0 or idx == total - 1:
-                    progress_callback(pct, f"RapidOCR nhận diện chữ ({idx + 1}/{total} ảnh, đã trích {len(cues)} câu)...")
+        def flush_cache_writes():
+            if not pending_cache_writes:
+                return
+            for cf, payload_text in pending_cache_writes:
+                tmp_cf = cf.with_name(f"{cf.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+                try:
+                    tmp_cf.write_text(payload_text, encoding='utf-8')
+                    os.replace(tmp_cf, cf)
+                finally:
+                    tmp_cf.unlink(missing_ok=True)
+            pending_cache_writes.clear()
 
-            time_range = self._parse_vsf_time_range(image_path.stem)
-            if time_range is None:
-                continue
-            image = cv2.imread(str(image_path))
-            if image is None or image.size == 0:
-                continue
-
-            # Perceptual hash pre-filtering: merge adjacent duplicate frames to skip redundant OCR
-            img_hash = self._compute_dhash(image)
+        def emit_cue(image_path: Path, time_range, image: np.ndarray, img_hash: int, record: dict):
+            nonlocal prev_hash, prev_image, duplicate_count
             if cues and prev_hash is not None and self._hamming_distance(prev_hash, img_hash) <= 4 and prev_image is not None and np.array_equal(prev_image, image):
                 prev_cue = cues[-1]
                 if abs(time_range[0] - prev_cue.end) <= 0.5:
                     prev_cue.end = max(prev_cue.end, round(time_range[1], 3))
                     prev_hash = img_hash
-                    continue
-
-            import hashlib,importlib.metadata,tempfile
-            try:engine_version=importlib.metadata.version('rapidocr-onnxruntime')
-            except importlib.metadata.PackageNotFoundError:engine_version='unknown'
-            identity=hashlib.sha256(image_path.read_bytes()+('rapid-cache-v1:'+engine_version+':'+settings.OCR_LANGUAGES).encode()).hexdigest()
-            cache_root=settings.storage_path.parent/'ocr_cache';cache_root.mkdir(parents=True,exist_ok=True)
-            cache_file=cache_root/(identity+'.json');record=None
-            if cache_file.is_file():
-                try:
-                    cached=json.loads(cache_file.read_text(encoding='utf-8'))
-                    encoded=json.dumps(cached['result'],sort_keys=True,ensure_ascii=False).encode()
-                    if hashlib.sha256(encoded).hexdigest()==cached['sha256']:record=cached['result']
-                except (ValueError,KeyError,OSError,TypeError):pass
-            if record is None:
-                text,confidence=engine.recognize(image)
-                alternatives=engine.last_alternatives if isinstance(getattr(engine,'last_alternatives',None),list) else []
-                record={'text':text,'confidence':float(confidence),'alternatives':alternatives}
-                encoded=json.dumps(record,sort_keys=True,ensure_ascii=False).encode()
-                with tempfile.NamedTemporaryFile('w',dir=cache_root,delete=False,encoding='utf-8') as stream:
-                    json.dump({'result':record,'sha256':hashlib.sha256(encoded).hexdigest()},stream,ensure_ascii=False);stream.flush();os.fsync(stream.fileno());temporary=stream.name
-                os.replace(temporary,cache_file)
-            text,confidence=record['text'],record['confidence']
-            alternatives=record['alternatives']
+                    duplicate_count += 1
+                    return
+            text, confidence = record['text'], record['confidence']
+            alternatives = record['alternatives']
             check_disk()
             if not text.strip():
-                continue
+                return
             number = len(cues) + 1
             evidence_name = f"cue_{number:04d}{image_path.suffix.lower()}"
             shutil.copy2(image_path, evidence_dir / evidence_name)
@@ -548,13 +792,152 @@ class VideoSubFinderAdapter:
                 text=text.strip(),
                 confidence=round(confidence, 1),
                 ocr_alternatives=alternatives,
+                text_classification='uncertain' if alternatives else 'unclassified',
                 image_path=f"cues/{evidence_name}",
             ))
             prev_hash = img_hash
             prev_image = image.copy()
 
+        def build_record(text: str, confidence: float, alternatives: list, cf: Path):
+            alts = alternatives if isinstance(alternatives, list) else []
+            rec = {'text': text, 'confidence': float(confidence), 'alternatives': alts}
+            encoded = json.dumps(rec, sort_keys=True, ensure_ascii=False).encode()
+            payload = json.dumps({'result': rec, 'sha256': hashlib.sha256(encoded).hexdigest()}, ensure_ascii=False)
+            pending_cache_writes.append((cf, payload))
+            if len(pending_cache_writes) >= 16:
+                flush_cache_writes()
+            return rec
+
+        use_batch = callable(getattr(type(engine), 'recognize_batch', None))
+        pending_misses: List[dict] = []
+
+        def flush_misses():
+            nonlocal engine, engine_version, recognized, gpu_fallbacks
+            if not pending_misses:
+                return
+            batch = list(pending_misses)
+            pending_misses.clear()
+            from src.ocr.gpu_client import OCRGPUError
+            batch_records = None
+            if use_batch and self.engine.endswith('-cuda'):
+                try:
+                    batch_out = engine.recognize_batch([m['image_path'] for m in batch])
+                    batch_records = []
+                    for m, (txt, conf, alts) in zip(batch, batch_out):
+                        recognized += 1
+                        recognized_by_engine[self.engine] = recognized_by_engine.get(self.engine, 0) + 1
+                        batch_records.append(build_record(txt, conf, alts, m['cache_file']))
+                except OCRGPUError:
+                    batch_records = None
+            if batch_records is None:
+                batch_records = []
+                for m in batch:
+                    recognized += 1
+                    try:
+                        txt, conf = engine.recognize(m['image'])
+                    except OCRGPUError:
+                        # Keep valid prefix cues and GPU cache entries. Restart only
+                        # this image on CPU, with the CPU's distinct cache identity.
+                        self._use_cpu()
+                        engine = self._ocr_engine
+                        engine_version = distribution_version + ':' + engine.cache_version
+                        ident = hashlib.sha256(m['image_bytes'] + ('rapid-cache-v1:' + engine_version + ':' + settings.OCR_LANGUAGES).encode()).hexdigest()
+                        m['cache_file'] = cache_root / (ident + '.json')
+                        gpu_fallbacks += 1
+                        txt, conf = engine.recognize(m['image'])
+                    recognized_by_engine[self.engine] = recognized_by_engine.get(self.engine, 0) + 1
+                    alts = engine.last_alternatives if isinstance(getattr(engine, 'last_alternatives', None), list) else []
+                    batch_records.append(build_record(txt, conf, alts, m['cache_file']))
+            for m, rec in zip(batch, batch_records):
+                emit_cue(m['image_path'], m['time_range'], m['image'], m['img_hash'], rec)
+
+        try:
+            for idx, image_path in enumerate(candidates):
+                check_disk()
+                if should_continue and not should_continue():
+                    raise TaskCancelled("Đã dừng trong lúc nhận diện OCR")
+
+                if progress_callback:
+                    pct = 40 + int((idx / total) * 32)
+                    if idx % 2 == 0 or idx == total - 1:
+                        backend = 'CUDA' if self.engine.endswith('-cuda') else 'CPU'
+                        progress_callback(pct, f"Đọc chữ lần 1 (RapidOCR: {idx}/{total} ảnh, {backend})")
+
+                time_range = self._parse_vsf_time_range(image_path.stem)
+                if time_range is None:
+                    continue
+                image_bytes = image_path.read_bytes()
+                image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if image is None or image.size == 0:
+                    continue
+
+                img_hash = self._compute_dhash(image)
+                if not pending_misses and cues and prev_hash is not None and self._hamming_distance(prev_hash, img_hash) <= 4 and prev_image is not None and np.array_equal(prev_image, image):
+                    prev_cue = cues[-1]
+                    if abs(time_range[0] - prev_cue.end) <= 0.5:
+                        prev_cue.end = max(prev_cue.end, round(time_range[1], 3))
+                        prev_hash = img_hash
+                        duplicate_count += 1
+                        continue
+
+                identity = hashlib.sha256(image_bytes + ('rapid-cache-v1:' + engine_version + ':' + settings.OCR_LANGUAGES).encode()).hexdigest()
+                cache_file = cache_root / (identity + '.json')
+                record = None
+                if cache_file.is_file():
+                    try:
+                        cached = json.loads(cache_file.read_text(encoding='utf-8'))
+                        encoded = json.dumps(cached['result'], sort_keys=True, ensure_ascii=False).encode()
+                        result = cached['result']
+                        if (hashlib.sha256(encoded).hexdigest() == cached['sha256']
+                                and isinstance(result, dict) and isinstance(result.get('text'), str)
+                                and type(result.get('confidence')) in (int, float)
+                                and math.isfinite(result['confidence']) and 0 <= result['confidence'] <= 100
+                                and isinstance(result.get('alternatives'), list)
+                                and all(isinstance(item, dict) for item in result['alternatives'])):
+                            record = result
+                    except (ValueError, KeyError, OSError, TypeError):
+                        pass
+
+                if record is not None:
+                    flush_misses()
+                    cache_hits += 1
+                    emit_cue(image_path, time_range, image, img_hash, record)
+                    continue
+
+                # Coalesce adjacent identical misses in memory before GPU batching.
+                if pending_misses:
+                    last_m = pending_misses[-1]
+                    if (self._hamming_distance(last_m['img_hash'], img_hash) <= 4
+                            and abs(time_range[0] - last_m['time_range'][1]) <= 0.5
+                            and np.array_equal(last_m['image'], image)):
+                        last_m['time_range'] = (last_m['time_range'][0], max(last_m['time_range'][1], time_range[1]))
+                        duplicate_count += 1
+                        continue
+
+                pending_misses.append({
+                    'image_path': image_path,
+                    'time_range': time_range,
+                    'image': image,
+                    'image_bytes': image_bytes,
+                    'img_hash': img_hash,
+                    'cache_file': cache_file,
+                })
+                if not use_batch or len(pending_misses) >= 16:
+                    flush_misses()
+
+            flush_misses()
+        finally:
+            flush_cache_writes()
+
+        from src.translation.memory import atomic_json
+        atomic_json(output_dir / 'rapidocr_pass.json', {
+            'elapsed_seconds': round(time.perf_counter() - started_at, 3),
+            'images': total, 'adjacent_duplicates': duplicate_count, 'cache_hits': cache_hits,
+            'recognized_images': recognized, 'cues': len(cues), 'engine': self.engine,
+            'recognized_by_engine': recognized_by_engine, 'gpu_fallbacks': gpu_fallbacks,
+        })
         if progress_callback:
-            progress_callback(98, f"Hoàn tất bóc tách {len(cues)} câu thoại từ {total} khung hình")
+            progress_callback(72, f"Đọc chữ lần 1 (RapidOCR: {total}/{total} ảnh)")
 
         return cues
 
